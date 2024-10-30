@@ -24,7 +24,8 @@ This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("Start of initialization process")
-		initCommand(args[0])
+
+		initCommand(args)
 	},
 }
 
@@ -43,13 +44,13 @@ func init() {
 }
 
 // initCommand initializes the repository and configuration files
-func initCommand(customPath string) {
-	var yogayaDir string
-	if customPath != "" {
-		yogayaDir = fmt.Sprintf("%s/.yogaya", customPath)
-	} else {
+func initCommand(args []string) {
+	yogayaDir := ""
+	if len(args) < 1 {
 		homeDir, _ := os.UserHomeDir()
 		yogayaDir = fmt.Sprintf("%s/.yogaya", homeDir)
+	} else {
+		yogayaDir = fmt.Sprintf("%s/.yogaya", args[0])
 	}
 
 	// Create .yogaya directory
