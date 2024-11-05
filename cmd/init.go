@@ -4,9 +4,12 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,37 +17,21 @@ import (
 
 // initCmd represents the init command
 var initCmd = &cobra.Command{
-	Use:   "init",
-	Short: "init",
-	Long: `A longer description that spans multiple lines and likely contains yogayas
-and usage of using your command. For yogaya:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Start of initialization process")
-
-		initCommand(args)
-	},
+	Use:   "init [path]",
+	Short: "Initialize a yogaya Application",
+	// Long:  `aaaaaaaaaaaa`,
+	Run: initCommand,
 }
 
 func init() {
+	rootCmd.DisableFlagParsing = true
 	rootCmd.AddCommand(initCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// initCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// initCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
 // initCommand initializes the repository and configuration files
-func initCommand(args []string) {
+func initCommand(cmd *cobra.Command, args []string) {
+	fmt.Println("Start of initialization process")
+
 	yogayaDir := ""
 	if len(args) < 1 {
 		homeDir, _ := os.UserHomeDir()
@@ -59,8 +46,7 @@ func initCommand(args []string) {
 	// Create tenant.conf
 	tenantConf := fmt.Sprintf("%s/tenant.conf", yogayaDir)
 	time := time.Now()
-	// tenantKey変数にtimeをハッシュ化した値を代入（ハッシュ化については要精査）
-	tenantKey := fmt.Sprintf("%x", time)
+	tenantKey := hashingTime(time)
 	_ = os.WriteFile(tenantConf, []byte(fmt.Sprintf("tenant_key=%s", tenantKey)), 0644)
 
 	// Create cloud_accounts.conf
@@ -70,5 +56,32 @@ func initCommand(args []string) {
 	// Initialize Git repository
 	exec.Command("git", "init", yogayaDir).Run()
 
-	fmt.Println("Initialized configuration in", yogayaDir)
+	readlinkCmd := exec.Command("readlink", "-f", yogayaDir)
+	output, err := readlinkCmd.Output()
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		return
+	}
+
+	// Print of absolute path
+	absolutePath := strings.TrimSpace(string(output))
+
+	fmt.Println("Completed initialization process!")
+	fmt.Println("Initialized configuration in", absolutePath)
+}
+
+// HashingTime takes a time.Time value and returns its SHA-256 hash as a hexadecimal string.
+func hashingTime(t time.Time) string {
+	// Convert time.Time to string in RFC 3339 format
+	timeString := t.Format(time.RFC3339)
+
+	// Create a new SHA-256 hash
+	hash := sha256.New()
+	// Write the byte representation of the string to the hash
+	hash.Write([]byte(timeString))
+	// Get the final hash value
+	hashBytes := hash.Sum(nil)
+
+	// Return the hash value as a hexadecimal string
+	return hex.EncodeToString(hashBytes)
 }
