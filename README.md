@@ -29,10 +29,7 @@ Before building, install required packages:
 1. Navigate to the project directory:
    `cd ./yogaya-cli`
 
-2. Install the required packages:
-   `go mod tidy`
-
-3. Build the project:
+2. Build the project:
    `go build -o yogaya ./main.go`
 
 > This will generate an executable file (yogaya) in the repository.
