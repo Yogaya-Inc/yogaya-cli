@@ -6,13 +6,17 @@
 
 First, install Go using Homebrew (Mac):
 
-`brew install go`
+```bash
+brew install go
+```
 
 > Go has backward version compatibility, so having the latest version installed will allow you to run older code and executables.
 
 Verify the installation:
 
-`go version`
+```bash
+go version
+```
 
 > If the version is displayed, the installation is complete.
 
@@ -20,17 +24,23 @@ Verify the installation:
 
 Before building, install required packages:
 
-`go mod tidy`
+```bash
+go mod tidy
+```
 
 > This command will automatically download and install all necessary dependencies defined in the project.
 
 ## Build Instructions
 
 1. Navigate to the project directory:
-   `cd ./yogaya-cli`
+   ```bash
+   cd ./yogaya-cli
+    ```
 
 2. Build the project:
-   `go build -o yogaya ./main.go`
+   ```bash
+   go build -o yogaya ./main.go
+    ```
 
 > This will generate an executable file (yogaya) in the repository.
 >
@@ -47,10 +57,14 @@ Before building, install required packages:
 You can run the executable in two ways:
 
 - Create .yogaya directory in current directory:
-   `./yogaya init ./`
+   ````bash
+   ./yogaya init ./
+    ````
 
 - Create .yogaya directory in home directory:
-   `./yogaya init`
+   ```bash
+   ./yogaya init
+    ```
 
 The .yogaya directory will contain:
 - `cloud_accounts.conf`: Empty file
