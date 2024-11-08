@@ -17,9 +17,8 @@ import (
 
 // generateCmd represents the generate command
 var generateCmd = &cobra.Command{
-	Use:   "generate [credential file path]",
+	Use:   "generate [.yogaya/cloud_accounts.conf-file-path]",
 	Short: "Generate Terraform code from cloud resources",
-	Args:  cobra.ExactArgs(1),
 	Run:   generateCommand,
 }
 
@@ -30,6 +29,11 @@ func init() {
 
 // runGenerate handles the main generation process
 func generateCommand(cmd *cobra.Command, args []string) {
+	if len(args) != 1 {
+		fmt.Println("Usage: yogaya generate <.yogaya/cloud_accounts.conf-file-path>")
+		return
+	}
+
 	// Initialize credential manager
 	credManager := &CredentialManager{
 		configPath: args[0],

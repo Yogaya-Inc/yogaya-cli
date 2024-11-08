@@ -23,7 +23,7 @@ import (
 
 // addCmd represents the add command
 var addCmd = &cobra.Command{
-	Use:   "add [cloudServiceName] [accountName] [configPath] [credentialFilePath]",
+	Use:   "add [provider-name] [.yogaya/cloud_accounts.conf-file-path] [provider-credentials-file-path]",
 	Short: "Initialize a cloud account with credentials",
 	Run:   addCommand,
 }
@@ -314,7 +314,7 @@ func (cm *CredentialManager) ListAccounts() {
 // addCommand adds a cloud account with the credentials.
 func addCommand(cmd *cobra.Command, args []string) {
 	if len(args) != 3 {
-		fmt.Println("Usage: example add <provider> <config-path> <credentials-file>")
+		fmt.Println("Usage: yogaya add <provider-name> <.yogaya/cloud_accounts.conf-file-path> <provider-credentials-file-path>")
 		return
 	}
 

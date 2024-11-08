@@ -17,7 +17,7 @@ import (
 
 // initCmd represents the init command
 var initCmd = &cobra.Command{
-	Use:   "init [path]",
+	Use:   "init [(opt)path-where-you-want-to-create-the-.yogaya/-directory]",
 	Short: "Initialize a yogaya Application",
 	// Long:  `aaaaaaaaaaaa`,
 	Run: initCommand,
@@ -46,13 +46,15 @@ func initCommand(cmd *cobra.Command, args []string) {
 	// Create tenant.conf
 	tenantConf := fmt.Sprintf("%s/tenant.conf", yogayaDir)
 	time := time.Now()
+	// TBD:Details of tenant key will be decided later.
 	tenantKey := hashingTime(time)
 	_ = os.WriteFile(tenantConf, []byte(fmt.Sprintf("tenant_key=%s", tenantKey)), 0644)
 
 	// Create cloud_accounts.conf
 	cloudConf := fmt.Sprintf("%s/cloud_accounts.conf", yogayaDir)
-	_ = os.WriteFile(cloudConf, []byte(""), 0644)
+	_ = os.WriteFile(cloudConf, []byte("{}"), 0644)
 
+	// Gitインストールする処理 or Gitのインストール必須の旨をドキュメントに記載（優先度低い）
 	// Initialize Git repository
 	exec.Command("git", "init", yogayaDir).Run()
 

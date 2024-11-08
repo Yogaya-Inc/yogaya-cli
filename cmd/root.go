@@ -12,7 +12,7 @@ import (
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "yogaya",
-	Short: "Yogaya is IaC Tool of AWS,GCP,Azure",
+	Short: "Yogaya is IaC Tool for AWS,GCP",
 	// Long:  `A longer description will be provided in the near future.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:

@@ -17,6 +17,9 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# Mac OS
+.DS_Store
+
 # Go workspace file
 go.work
 go.work.sum
@@ -30,3 +33,6 @@ yogaya
 
 # Generated init command directory
 .yogaya/
+
+# Generated generate command directory
+generated/
