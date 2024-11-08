@@ -61,6 +61,7 @@ func initCommand(cmd *cobra.Command, args []string) {
 	output, err := readlinkCmd.Output()
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
+		fmt.Printf("If you do not have Git installed locally, please install it and re-run this command.\n")
 		return
 	}
 
