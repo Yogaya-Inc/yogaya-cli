@@ -54,7 +54,6 @@ func initCommand(cmd *cobra.Command, args []string) {
 	cloudConf := fmt.Sprintf("%s/cloud_accounts.conf", yogayaDir)
 	_ = os.WriteFile(cloudConf, []byte("{}"), 0644)
 
-	// Gitインストールする処理 or Gitのインストール必須の旨をドキュメントに記載（優先度低い）
 	// Initialize Git repository
 	exec.Command("git", "init", yogayaDir).Run()
 
