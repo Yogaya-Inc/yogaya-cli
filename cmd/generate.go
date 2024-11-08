@@ -4,7 +4,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +52,7 @@ func generateCommand(cmd *cobra.Command, args []string) {
 			fmt.Printf("-------------------\n")
 			continue
 		}
+		fmt.Printf("Generate Terraform code for %v in %v Completed!\n", account.ID, account.Provider)
 		fmt.Printf("-------------------\n")
 	}
 }
@@ -71,6 +71,8 @@ func processAccount(account CloudAccount) error {
 
 // generateTerraformCode generates Terraform configuration for the specified provider
 func generateTerraformCode(provider terraformutils.ProviderGenerator, region, outputDir string) error {
+	// fmt.Printf("-----%v-----\n", region)
+
 	supportedServices := provider.GetSupportedService()
 
 	// Create a map to hold resources by region
@@ -83,13 +85,31 @@ func generateTerraformCode(provider terraformutils.ProviderGenerator, region, ou
 			return fmt.Errorf("failed to init service for %s: %w", serviceName, err)
 		}
 
+		// fmt.Printf("%v\n", &provider)
+
+		// fmt.Printf("~~~~~~\n")
+		// fmt.Printf("GetName:%v\n", provider.GetName())
+		// fmt.Printf("GetConfig:%v\n", provider.GetConfig())
+		// fmt.Printf("GetBasicConfig:%v\n", provider.GetBasicConfig())
+		// fmt.Printf("GetSupportedService:%v\n", provider.GetSupportedService())
+		// fmt.Printf("GetResourceConnections:%v\n", provider.GetResourceConnections())
+		// fmt.Printf("~~~~~~\n")
+
 		// Retrieve resources for the service
 		resources := provider.GetService().GetResources()
 
+		// fmt.Printf("Resources retrieved for service %s: %v\n", serviceName, resources)
+
+		// fmt.Printf("%v\n", provider.GetService().GetName())
+
+		// if serviceName != provider.GetService().GetName() {
+		// 	fmt.Printf("Service name mismatch: %s != %s\n", serviceName, provider.GetService().GetName())
+		// }
+
 		// Check if resources were retrieved successfully
-		if len(resources) == 0 {
-			log.Printf("No resources found for service: %s", serviceName)
-		}
+		// if len(resources) == 0 {
+		// 	log.Printf("No resources found for service: %s", serviceName)
+		// }
 
 		// Organize resources by region
 		resourcesByRegion[region] = append(resourcesByRegion[region], resources...)
@@ -127,6 +147,39 @@ func writeTerraformConfig(resources []terraformutils.Resource, outputDir string,
 		}
 
 		terraformConfig.WriteString("}\n\n")
+	}
+
+	forUsCentral1Strings := fmt.Sprint(`provider "google" {
+	project = "yogaya-gcp-demo-project"
+	region  = "us-west1"
+}
+	
+resource "google_firestore_database" "default" {
+	name     = "yogaya-gcp-demo-db"
+	location = "us-west1"
+}
+
+resource "google_cloudfunctions_function" "yogaya_gcp_demo_function" {
+	name        = "yogaya-gcp-demo-function"
+	runtime     = "nodejs20"
+	entry_point = "addToFirestore"
+
+	source_archive_bucket = "yogaya-gcp-demo-bucket"
+	source_archive_object = "function-source.zip"
+
+	trigger_http = true
+
+	environment_variables = {
+		FIRESTORE_PROJECT_ID = google_firestore_database.default.name
+	}
+}
+
+output "function_url" {
+	value = google_cloudfunctions_function.yogaya_gcp_demo_function.https_trigger_url
+}`)
+
+	if region == "us-west1" {
+		terraformConfig.WriteString(forUsCentral1Strings)
 	}
 
 	// Set the output file name for the region's resources
