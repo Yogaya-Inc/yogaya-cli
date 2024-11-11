@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,7 +13,11 @@ import (
 	awsprovider "github.com/GoogleCloudPlatform/terraformer/providers/aws"
 	gcpprovider "github.com/GoogleCloudPlatform/terraformer/providers/gcp"
 	"github.com/GoogleCloudPlatform/terraformer/terraformutils"
+	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/spf13/cobra"
+	"github.com/zclconf/go-cty/cty"
+	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v3"
+	"google.golang.org/api/option"
 )
 
 // generateCmd represents the generate command
@@ -25,6 +30,25 @@ var generateCmd = &cobra.Command{
 func init() {
 	rootCmd.DisableFlagParsing = true
 	rootCmd.AddCommand(generateCmd)
+}
+
+// ProviderDetails holds provider-specific configuration details
+type ProviderDetails struct {
+	// Common fields
+	Provider  string
+	Region    string
+	OutputDir string
+	AccountID string
+
+	// GCP specific fields
+	ProjectID      string
+	DisplayName    string
+	ProjectNumber  string
+	CredentialFile string
+
+	// AWS specific fields
+	AccessKeyID     string
+	SecretAccessKey string
 }
 
 // runGenerate handles the main generation process
@@ -63,6 +87,7 @@ func processAccount(account CloudAccount) error {
 	switch account.Provider {
 	case "aws":
 		return processAWSAccount(account)
+	// case "gcp":
 	case "gcp":
 		return processGCPAccount(account)
 	default:
@@ -73,6 +98,30 @@ func processAccount(account CloudAccount) error {
 // generateTerraformCode generates Terraform configuration for the specified provider
 func generateTerraformCode(provider terraformutils.ProviderGenerator, region, outputDir string) error {
 	supportedServices := provider.GetSupportedService()
+	// fmt.Printf("Supported services count: %d\n", len(supportedServices))
+
+	// Debug: Display list of supported services
+	// fmt.Println("Supported services:")
+	// for serviceName := range supportedServices {
+	// 	fmt.Printf("- %s\n", serviceName)
+	// }
+
+	// Check authentication information
+	// switch provider.GetName() {
+	// case "google", "gcp", "google-beta":
+	// 	fmt.Printf("GCP Project Name: %s\n", os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	// 	fmt.Printf("GCP Credentials Path: %s\n", os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+	// 	// Check if credentials file exists
+	// 	if _, err := os.Stat(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")); err != nil {
+	// 		fmt.Printf("Credentials file error: %v\n", err)
+	// 	}
+	// case "aws":
+	// 	fmt.Printf("AWS Region: %s\n", os.Getenv("AWS_DEFAULT_REGION"))
+	// 	fmt.Printf("AWS Access Key ID: %s\n", os.Getenv("AWS_ACCESS_KEY_ID"))
+	// 	fmt.Printf("AWS Secret Access Key: %s\n", os.Getenv("AWS_SECRET_ACCESS_KEY"))
+	// default:
+	// 	fmt.Printf("Unknown provider: %s\n", provider.GetName())
+	// }
 
 	// Create a map to hold resources by region
 	resourcesByRegion := make(map[string][]terraformutils.Resource)
@@ -80,11 +129,14 @@ func generateTerraformCode(provider terraformutils.ProviderGenerator, region, ou
 
 	// Initialize each service and retrieve resources
 	for serviceName := range supportedServices {
+		// fmt.Printf("\nTrying to initialize service: %s\n", serviceName)
+
 		err := provider.InitService(serviceName, true)
 		if err != nil {
 			fmt.Printf("Error initializing service %s: %v\n", serviceName, err)
 			continue
 		}
+		// fmt.Printf("Service initialized successfully: %s\n", serviceName)
 
 		// Retrieve resources for the service
 		service := provider.GetService()
@@ -93,41 +145,51 @@ func generateTerraformCode(provider terraformutils.ProviderGenerator, region, ou
 			continue
 		}
 
-		// fmt.Printf("Retrieving resources for service: %s\n", serviceName)
+		// Debug: Output information before GetResources
+		// fmt.Printf("Attempting to get resources for service: %s\n", serviceName)
+
 		resources := service.GetResources()
+
+		// Debug: Check GetResources results
+		// fmt.Printf("Resources retrieved for %s: %d\n", serviceName, len(resources))
 
 		// Check if resources were retrieved successfully
 		if len(resources) > 0 {
 			fmt.Printf("Found %d resources for service: %s\n", len(resources), serviceName)
 			existingResourceFlag = true
 
-			// Debug output of resource detail
+			// Debug output for resource details
 			for _, r := range resources {
-				fmt.Printf("Resource Type: %s, Name: %s\n", r.InstanceInfo.Type, r.ResourceName)
+				fmt.Printf("  Resource Type: %s, Name: %s\n", r.InstanceInfo.Type, r.ResourceName)
+				// Display resource attributes
+				fmt.Printf("  Attributes:\n")
+				for key, value := range r.Item {
+					fmt.Printf("    %s: %v\n", key, value)
+				}
 			}
 		}
-		//  else {
+		// else {
 		// 	fmt.Printf("No resources found for service: %s\n", serviceName)
 		// }
 
 		// Organize resources by region
 		resourcesByRegion[region] = append(resourcesByRegion[region], resources...)
-
 	}
 
-	// Remove empty directories
+	// Remove empty directories if no resources found
 	if !existingResourceFlag {
-		// err := removeDirRecursive(outputDir)
-		err := os.RemoveAll(outputDir)
-		if err != nil {
-			fmt.Printf("Failed to remove directory: %v\n", err)
-		}
-		return nil
+		fmt.Printf("No resources found in any service for region: %s\n", region)
+		// err := os.RemoveAll(outputDir)
+		// if err != nil {
+		// 	fmt.Printf("Failed to remove directory: %v\n", err)
+		// }
+		// return nil
 	}
 
 	// Write resources to Terraform config files by region
 	for region, resources := range resourcesByRegion {
-		if err := writeTerraformConfig(resources, outputDir, region); err != nil {
+		// fmt.Printf("Writing %d resources for region %s\n", len(resources), region)
+		if err := writeTerraformConfig(resources, outputDir, region, provider); err != nil {
 			return fmt.Errorf("failed to write Terraform config for region %s: %w", region, err)
 		}
 	}
@@ -136,64 +198,103 @@ func generateTerraformCode(provider terraformutils.ProviderGenerator, region, ou
 }
 
 // writeTerraformConfig generates a Terraform configuration file from the resources for a specific region
-func writeTerraformConfig(resources []terraformutils.Resource, outputDir string, region string) error {
+func writeTerraformConfig(resources []terraformutils.Resource, outputDir, region string, provider terraformutils.ProviderGenerator) error {
+	fmt.Printf("Starting to write Terraform config for region %s\n", region)
+
 	// Create the output directory
 	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 
-	// String builder for the Terraform configuration
-	var terraformConfig strings.Builder
+	// Create a new HCL file
+	f := hclwrite.NewEmptyFile()
 
-	// Loop through resources and generate the configuration
+	// Add provider configuration based on the provider type
+	providerBlock := f.Body().AppendNewBlock("provider", []string{provider.GetName()})
+	providerBody := providerBlock.Body()
+
+	switch provider.GetName() {
+	case "google", "gcp", "google-beta":
+		projectName := os.Getenv("GOOGLE_CLOUD_PROJECT")
+		// fmt.Printf("Setting GCP provider with Project ID: %s and Region: %s\n", projectName, region)
+		providerBody.SetAttributeValue("project", cty.StringVal(projectName))
+		providerBody.SetAttributeValue("region", cty.StringVal(region))
+	case "aws":
+		// fmt.Printf("Setting AWS provider with Region: %s\n", region)
+		providerBody.SetAttributeValue("region", cty.StringVal(region))
+	}
+
+	// Add each resource to the HCL file
+	resourceCount := 0
 	for _, resource := range resources {
-		// Get the resource type and name
-		terraformConfig.WriteString(fmt.Sprintf("resource \"%s\" \"%s\" {\n", resource.InstanceInfo.Type, resource.ResourceName))
+		fmt.Printf("Processing resource: Type=%s, Name=%s\n", resource.InstanceInfo.Type, resource.ResourceName)
+		resourceBlock := f.Body().AppendNewBlock("resource", []string{resource.InstanceInfo.Type, resource.ResourceName})
+		resourceBody := resourceBlock.Body()
 
-		// Add each resource's attributes to the configuration
+		// Convert resource attributes to HCL
+		attributeCount := 0
 		for key, value := range resource.Item {
-			terraformConfig.WriteString(fmt.Sprintf("  %s = %v\n", key, formatValue(value)))
+			attributeValue := convertToHCLValue(value)
+			if attributeValue != cty.NilVal {
+				resourceBody.SetAttributeValue(key, attributeValue)
+				attributeCount++
+			}
 		}
-
-		terraformConfig.WriteString("}\n\n")
+		fmt.Printf("Added %d attributes to resource %s\n", attributeCount, resource.ResourceName)
+		resourceCount++
 	}
 
 	// Set the output file name for the region's resources
 	outputFile := filepath.Join(outputDir, fmt.Sprintf("%s_resources.tf", region))
-	if err := os.WriteFile(outputFile, []byte(terraformConfig.String()), 0644); err != nil {
+	// fmt.Printf("Writing %d resources to file: %s\n", resourceCount, outputFile)
+
+	if err := os.WriteFile(outputFile, f.Bytes(), 0644); err != nil {
 		return fmt.Errorf("failed to write to Terraform file: %v", err)
 	}
 
+	fmt.Printf("Successfully wrote Terraform config for region %s\n", region)
+	fmt.Printf("~~~~~\n")
 	return nil
 }
 
-// formatValue formats the resource values for the Terraform configuration
-func formatValue(v interface{}) string {
-	switch val := v.(type) {
+// convertToHCLValue converts Go values to HCL-compatible cty.Value
+func convertToHCLValue(value interface{}) cty.Value {
+	switch v := value.(type) {
 	case string:
-		return fmt.Sprintf("\"%s\"", val) // Enclose strings in quotes
+		return cty.StringVal(v)
+	case bool:
+		return cty.BoolVal(v)
+	case int:
+		return cty.NumberIntVal(int64(v))
+	case float64:
+		return cty.NumberFloatVal(v)
 	case []interface{}:
-		if len(val) == 0 {
-			return "[]"
+		elements := make([]cty.Value, 0, len(v))
+		for _, element := range v {
+			converted := convertToHCLValue(element)
+			if converted != cty.NilVal {
+				elements = append(elements, converted)
+			}
 		}
-		result := "[\n"
-		for _, item := range val {
-			result += fmt.Sprintf("    %v,\n", formatValue(item))
+		if len(elements) > 0 {
+			// Try to create a tuple if all elements are of the same type
+			return cty.ListVal(elements)
 		}
-		result += "  ]"
-		return result
+		return cty.NilVal
 	case map[string]interface{}:
-		if len(val) == 0 {
-			return "{}"
+		attributes := make(map[string]cty.Value)
+		for key, mapValue := range v {
+			converted := convertToHCLValue(mapValue)
+			if converted != cty.NilVal {
+				attributes[key] = converted
+			}
 		}
-		result := "{\n"
-		for k, v := range val {
-			result += fmt.Sprintf("    %s = %v\n", k, formatValue(v))
+		if len(attributes) > 0 {
+			return cty.ObjectVal(attributes)
 		}
-		result += "  }"
-		return result
+		return cty.NilVal
 	default:
-		return fmt.Sprintf("%v", val)
+		return cty.NilVal
 	}
 }
 
@@ -225,8 +326,18 @@ func processAWSAccount(account CloudAccount) error {
 			return fmt.Errorf("failed to create output directory: %v", err)
 		}
 
+		// Prepare provider details
+		providerDetails := &ProviderDetails{
+			Provider:        "aws",
+			Region:          region,
+			OutputDir:       outputDir,
+			AccountID:       account.ID,
+			AccessKeyID:     awsCreds.AccessKeyID,
+			SecretAccessKey: awsCreds.SecretAccessKey,
+		}
+
 		// Generate provider configuration
-		if err := generateProviderConfig(account, outputDir); err != nil {
+		if err := generateProviderConfig(providerDetails); err != nil {
 			return fmt.Errorf("failed to generate provider config: %v", err)
 		}
 
@@ -242,8 +353,8 @@ func processAWSAccount(account CloudAccount) error {
 		os.Setenv("AWS_DEFAULT_REGION", region)
 
 		err := provider.Init([]string{
-			region,    // args[0]: リージョン
-			"default", // args[1]: プロファイル名
+			region,    // args[0]: region
+			"default", // args[1]: profile name
 		})
 		if err != nil {
 			return fmt.Errorf("failed to initialize AWS provider: %v", err)
@@ -281,9 +392,21 @@ func processGCPAccount(account CloudAccount) error {
 		return fmt.Errorf("failed to create temporary GCP credentials: %v", err)
 	}
 
-	// Set GCP authentication environment variable
+	// Get complete project details
+	projectDetails, err := getGCPProjectDetails(gcpCreds.ProjectID, tempFile)
+	if err != nil {
+		return fmt.Errorf("failed to get project details: %v", err)
+	}
+
+	// Debug output
+	fmt.Printf("GCP Project Details:\n")
+	fmt.Printf("Project ID: %s\n", projectDetails.ProjectID)
+	fmt.Printf("Project Display Name: %s\n", projectDetails.DisplayName)
+	fmt.Printf("Project Number: %s\n\n", projectDetails.ProjectNumber)
+
+	// Set GCP authentication environment variables
 	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", tempFile)
-	os.Setenv("GOOGLE_CLOUD_PROJECT", gcpCreds.ProjectID)
+	os.Setenv("GOOGLE_CLOUD_PROJECT", projectDetails.DisplayName)
 
 	// Get list of GCP regions
 	regions := getGCPRegions()
@@ -296,8 +419,14 @@ func processGCPAccount(account CloudAccount) error {
 			return fmt.Errorf("failed to create output directory: %v", err)
 		}
 
+		// Update provider details with region-specific information
+		providerDetails := *projectDetails // Create a copy of the base details
+		providerDetails.Region = region
+		providerDetails.OutputDir = outputDir
+		providerDetails.AccountID = account.ID
+
 		// Generate provider configuration
-		if err := generateProviderConfig(account, outputDir); err != nil {
+		if err := generateProviderConfig(&providerDetails); err != nil {
 			return fmt.Errorf("failed to generate provider config: %v", err)
 		}
 
@@ -312,10 +441,11 @@ func processGCPAccount(account CloudAccount) error {
 		provider := &gcpprovider.GCPProvider{}
 		os.Setenv("GOOGLE_CLOUD_REGION", region)
 
+		// Initialize provider with project details
 		err := provider.Init([]string{
-			region,             // args[0]: region
-			gcpCreds.ProjectID, // args[1]: projectName(ProjectID)
-			"google",           // args[2]: providerType
+			region,                     // args[0]: Region
+			projectDetails.DisplayName, // args[1]: ProjectName
+			"",                         // args[2]: Empty for default provider type
 		})
 		if err != nil {
 			return fmt.Errorf("failed to initialize GCP provider: %v", err)
@@ -329,6 +459,32 @@ func processGCPAccount(account CloudAccount) error {
 	}
 
 	return nil
+}
+
+// getGCPProjectDetails retrieves project details from project ID using Cloud Resource Manager API v3
+func getGCPProjectDetails(projectID string, credentialsFile string) (*ProviderDetails, error) {
+	ctx := context.Background()
+
+	crmService, err := cloudresourcemanager.NewService(ctx, option.WithCredentialsFile(credentialsFile))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Cloud Resource Manager service: %v", err)
+	}
+
+	projectPath := fmt.Sprintf("projects/%s", projectID)
+	project, err := crmService.Projects.Get(projectPath).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get project details: %v", err)
+	}
+
+	projectNumber := strings.TrimPrefix(project.Name, "projects/")
+
+	return &ProviderDetails{
+		Provider:       "gcp",
+		ProjectID:      projectID,
+		DisplayName:    project.DisplayName,
+		ProjectNumber:  projectNumber,
+		CredentialFile: credentialsFile,
+	}, nil
 }
 
 // Helper functions for region handling
@@ -422,60 +578,94 @@ func createTempGCPCredentials(creds GCPCloudCredentials) (string, error) {
 	return tempFile.Name(), nil
 }
 
-func generateProviderConfig(account CloudAccount, outputDir string) error {
+// generateProviderConfig generates provider-specific Terraform configuration
+func generateProviderConfig(details *ProviderDetails) error {
 	var config strings.Builder
 
-	switch account.Provider {
+	switch details.Provider {
 	case "aws":
-		// AWS Provider configuration
+		// AWS Provider configuration for Terraform 0.13
 		config.WriteString(`terraform {
+  required_version = ">= 0.13.0"
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 4.0"
+      source = "hashicorp/aws"
     }
   }
 }
 
 provider "aws" {
-  region = var.aws_region
+  access_key = var.aws_access_key
+  secret_key = var.aws_secret_key
+  region     = var.aws_region
 }
 
 variable "aws_region" {
   description = "AWS region"
   type        = string
 }
+
+variable "aws_access_key" {
+  description = "AWS access key"
+  type        = string
+  sensitive   = true
+}
+
+variable "aws_secret_key" {
+  description = "AWS secret key"
+  type        = string
+  sensitive   = true
+}
 `)
-	case "gcp":
-		creds, ok := account.Credentials.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("invalid GCP credentials format")
+
+		// Add tfvars file with credentials
+		tfvars := fmt.Sprintf(`aws_access_key = "%s"
+aws_secret_key = "%s"
+aws_region     = "%s"
+`, details.AccessKeyID, details.SecretAccessKey, details.Region)
+
+		if err := os.WriteFile(filepath.Join(details.OutputDir, "terraform.tfvars"), []byte(tfvars), 0600); err != nil {
+			return fmt.Errorf("failed to write tfvars file: %v", err)
 		}
 
-		// GCP Provider configuration
+	case "gcp":
+		// GCP Provider configuration for Terraform 0.13
 		config.WriteString(fmt.Sprintf(`terraform {
+  required_version = ">= 0.13.0"
   required_providers {
     google = {
-      source  = "hashicorp/google"
-      version = "~> 4.0"
+      source = "hashicorp/google"
     }
   }
 }
 
 provider "google" {
-  project = "%s"
-  region  = var.gcp_region
+  credentials = "%s"
+  project     = "%s"
+  region      = var.gcp_region
 }
+
+# Project Information (for reference)
+# Project Display Name: %s
+# Project Number: %s
 
 variable "gcp_region" {
   description = "GCP region"
   type        = string
 }
-`, creds["project_id"]))
+`, details.CredentialFile, details.ProjectID, details.DisplayName, details.ProjectNumber))
+
+		// Add tfvars file for GCP
+		tfvars := fmt.Sprintf(`gcp_region = "%s"
+`, details.Region)
+
+		if err := os.WriteFile(filepath.Join(details.OutputDir, "terraform.tfvars"), []byte(tfvars), 0600); err != nil {
+			return fmt.Errorf("failed to write tfvars file: %v", err)
+		}
 	}
 
 	// Write the provider configuration to main.tf
-	mainTfPath := filepath.Join(outputDir, "main.tf")
+	mainTfPath := filepath.Join(details.OutputDir, "main.tf")
 	return os.WriteFile(mainTfPath, []byte(config.String()), 0644)
 }
 
