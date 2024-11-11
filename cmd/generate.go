@@ -4,8 +4,8 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -53,6 +53,7 @@ func generateCommand(cmd *cobra.Command, args []string) {
 			fmt.Printf("-------------------\n")
 			continue
 		}
+		fmt.Printf("Generate Terraform code for %v in %v Completed!\n", account.ID, account.Provider)
 		fmt.Printf("-------------------\n")
 	}
 }
@@ -75,25 +76,53 @@ func generateTerraformCode(provider terraformutils.ProviderGenerator, region, ou
 
 	// Create a map to hold resources by region
 	resourcesByRegion := make(map[string][]terraformutils.Resource)
+	existingResourceFlag := false
 
 	// Initialize each service and retrieve resources
 	for serviceName := range supportedServices {
 		err := provider.InitService(serviceName, true)
 		if err != nil {
-			return fmt.Errorf("failed to init service for %s: %w", serviceName, err)
+			fmt.Printf("Error initializing service %s: %v\n", serviceName, err)
+			continue
 		}
 
 		// Retrieve resources for the service
-		resources := provider.GetService().GetResources()
+		service := provider.GetService()
+		if service == nil {
+			fmt.Printf("Service is nil for: %s\n", serviceName)
+			continue
+		}
+
+		// fmt.Printf("Retrieving resources for service: %s\n", serviceName)
+		resources := service.GetResources()
 
 		// Check if resources were retrieved successfully
-		if len(resources) == 0 {
-			log.Printf("No resources found for service: %s", serviceName)
+		if len(resources) > 0 {
+			fmt.Printf("Found %d resources for service: %s\n", len(resources), serviceName)
+			existingResourceFlag = true
+
+			// Debug output of resource detail
+			for _, r := range resources {
+				fmt.Printf("Resource Type: %s, Name: %s\n", r.InstanceInfo.Type, r.ResourceName)
+			}
 		}
+		//  else {
+		// 	fmt.Printf("No resources found for service: %s\n", serviceName)
+		// }
 
 		// Organize resources by region
 		resourcesByRegion[region] = append(resourcesByRegion[region], resources...)
 
+	}
+
+	// Remove empty directories
+	if !existingResourceFlag {
+		// err := removeDirRecursive(outputDir)
+		err := os.RemoveAll(outputDir)
+		if err != nil {
+			fmt.Printf("Failed to remove directory: %v\n", err)
+		}
+		return nil
 	}
 
 	// Write resources to Terraform config files by region
@@ -196,9 +225,29 @@ func processAWSAccount(account CloudAccount) error {
 			return fmt.Errorf("failed to create output directory: %v", err)
 		}
 
+		// Generate provider configuration
+		if err := generateProviderConfig(account, outputDir); err != nil {
+			return fmt.Errorf("failed to generate provider config: %v", err)
+		}
+
+		// Run terraform init
+		cmd := exec.Command("terraform", "init")
+		cmd.Dir = outputDir
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to run terraform init: %v", err)
+		}
+
 		// Initialize AWS provider with region
 		provider := &awsprovider.AWSProvider{}
 		os.Setenv("AWS_DEFAULT_REGION", region)
+
+		err := provider.Init([]string{
+			region,    // args[0]: リージョン
+			"default", // args[1]: プロファイル名
+		})
+		if err != nil {
+			return fmt.Errorf("failed to initialize AWS provider: %v", err)
+		}
 
 		// Generate Terraform configuration
 		if err := generateTerraformCode(provider, region, outputDir); err != nil {
@@ -231,10 +280,10 @@ func processGCPAccount(account CloudAccount) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temporary GCP credentials: %v", err)
 	}
-	defer os.Remove(tempFile)
 
 	// Set GCP authentication environment variable
 	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", tempFile)
+	os.Setenv("GOOGLE_CLOUD_PROJECT", gcpCreds.ProjectID)
 
 	// Get list of GCP regions
 	regions := getGCPRegions()
@@ -247,9 +296,30 @@ func processGCPAccount(account CloudAccount) error {
 			return fmt.Errorf("failed to create output directory: %v", err)
 		}
 
+		// Generate provider configuration
+		if err := generateProviderConfig(account, outputDir); err != nil {
+			return fmt.Errorf("failed to generate provider config: %v", err)
+		}
+
+		// Run terraform init
+		cmd := exec.Command("terraform", "init")
+		cmd.Dir = outputDir
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to run terraform init: %v", err)
+		}
+
 		// Initialize GCP provider with region
 		provider := &gcpprovider.GCPProvider{}
 		os.Setenv("GOOGLE_CLOUD_REGION", region)
+
+		err := provider.Init([]string{
+			region,             // args[0]: region
+			gcpCreds.ProjectID, // args[1]: projectName(ProjectID)
+			"google",           // args[2]: providerType
+		})
+		if err != nil {
+			return fmt.Errorf("failed to initialize GCP provider: %v", err)
+		}
 
 		// Generate Terraform configuration
 		if err := generateTerraformCode(provider, region, outputDir); err != nil {
@@ -318,16 +388,117 @@ func getGCPRegions() []string {
 
 // createTempGCPCredentials creates a temporary file containing GCP credentials
 func createTempGCPCredentials(creds GCPCloudCredentials) (string, error) {
+	credJSON := map[string]string{
+		"type":                        "service_account",
+		"project_id":                  creds.ProjectID,
+		"private_key_id":              creds.PrivateKeyID,
+		"private_key":                 creds.PrivateKey,
+		"client_email":                creds.ClientEmail,
+		"client_id":                   creds.ClientID,
+		"auth_uri":                    "https://accounts.google.com/o/oauth2/auth",
+		"token_uri":                   "https://oauth2.googleapis.com/token",
+		"auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+		"client_x509_cert_url":        fmt.Sprintf("https://www.googleapis.com/robot/v1/metadata/x509/%s", creds.ClientEmail),
+	}
+
 	tempFile, err := os.CreateTemp("", "gcp-creds-*.json")
 	if err != nil {
 		return "", err
 	}
+	defer tempFile.Close()
 
-	err = json.NewEncoder(tempFile).Encode(creds)
-	if err != nil {
+	// err = json.NewEncoder(tempFile).Encode(creds)
+	// if err != nil {
+	// 	os.Remove(tempFile.Name())
+	// 	return "", err
+	// }
+	encoder := json.NewEncoder(tempFile)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(credJSON); err != nil {
 		os.Remove(tempFile.Name())
-		return "", err
+		return "", fmt.Errorf("failed to write credentials to temp file: %v", err)
 	}
 
 	return tempFile.Name(), nil
 }
+
+func generateProviderConfig(account CloudAccount, outputDir string) error {
+	var config strings.Builder
+
+	switch account.Provider {
+	case "aws":
+		// AWS Provider configuration
+		config.WriteString(`terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+}
+`)
+	case "gcp":
+		creds, ok := account.Credentials.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("invalid GCP credentials format")
+		}
+
+		// GCP Provider configuration
+		config.WriteString(fmt.Sprintf(`terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 4.0"
+    }
+  }
+}
+
+provider "google" {
+  project = "%s"
+  region  = var.gcp_region
+}
+
+variable "gcp_region" {
+  description = "GCP region"
+  type        = string
+}
+`, creds["project_id"]))
+	}
+
+	// Write the provider configuration to main.tf
+	mainTfPath := filepath.Join(outputDir, "main.tf")
+	return os.WriteFile(mainTfPath, []byte(config.String()), 0644)
+}
+
+// func removeDirRecursive(dirPath string) error {
+// 	// Traverse and delete files and directories recursively
+// 	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+// 		// If an error occurs, return it immediately
+// 		if err != nil {
+// 			return err
+// 		}
+
+// 		// If it's a file, delete it
+// 		if !info.IsDir() {
+// 			return os.Remove(path)
+// 		} else {
+// 			// If it's an empty directory, delete it
+// 			return os.Remove(path)
+// 		}
+// 	})
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	// Finally, remove the directory itself
+// 	return os.Remove(dirPath)
+// }
