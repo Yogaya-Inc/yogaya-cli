@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	awsprovider "github.com/GoogleCloudPlatform/terraformer/providers/aws"
 	gcpprovider "github.com/GoogleCloudPlatform/terraformer/providers/gcp"
@@ -18,6 +19,7 @@ import (
 	"github.com/zclconf/go-cty/cty"
 	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v3"
 	"google.golang.org/api/option"
+	"google.golang.org/api/serviceusage/v1"
 )
 
 // generateCmd represents the generate command
@@ -42,7 +44,7 @@ type ProviderDetails struct {
 
 	// GCP specific fields
 	ProjectID      string
-	DisplayName    string
+	ProjectName    string
 	ProjectNumber  string
 	CredentialFile string
 
@@ -74,8 +76,7 @@ func generateCommand(cmd *cobra.Command, args []string) {
 		fmt.Printf("Starting generate Terraform code for %v in %v\n", account.ID, account.Provider)
 		if err := processAccount(account); err != nil {
 			fmt.Printf("Error processing account %s: %v\n", account.ID, err)
-			fmt.Printf("-------------------\n")
-			continue
+			return
 		}
 		fmt.Printf("Generate Terraform code for %v in %v Completed!\n", account.ID, account.Provider)
 		fmt.Printf("-------------------\n")
@@ -107,21 +108,26 @@ func generateTerraformCode(provider terraformutils.ProviderGenerator, region, ou
 	// }
 
 	// Check authentication information
-	// switch provider.GetName() {
-	// case "google", "gcp", "google-beta":
-	// 	fmt.Printf("GCP Project Name: %s\n", os.Getenv("GOOGLE_CLOUD_PROJECT"))
-	// 	fmt.Printf("GCP Credentials Path: %s\n", os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-	// 	// Check if credentials file exists
-	// 	if _, err := os.Stat(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")); err != nil {
-	// 		fmt.Printf("Credentials file error: %v\n", err)
-	// 	}
-	// case "aws":
-	// 	fmt.Printf("AWS Region: %s\n", os.Getenv("AWS_DEFAULT_REGION"))
-	// 	fmt.Printf("AWS Access Key ID: %s\n", os.Getenv("AWS_ACCESS_KEY_ID"))
-	// 	fmt.Printf("AWS Secret Access Key: %s\n", os.Getenv("AWS_SECRET_ACCESS_KEY"))
-	// default:
-	// 	fmt.Printf("Unknown provider: %s\n", provider.GetName())
-	// }
+	switch provider.GetName() {
+	case "google", "gcp", "google-beta":
+		if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
+			return fmt.Errorf("GOOGLE_CLOUD_PROJECT environment variable is not set")
+		}
+		fmt.Printf("GCP Project ID: %s\n", os.Getenv("GOOGLE_CLOUD_PROJECT"))
+		fmt.Printf("GCP Provider Name: %s\n", provider.GetName())
+		fmt.Printf("GCP Project Name: %s\n", os.Getenv("GOOGLE_CLOUD_PROJECT"))
+		fmt.Printf("GCP Credentials Path: %s\n", os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+		// Check if credentials file exists
+		if _, err := os.Stat(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")); err != nil {
+			fmt.Printf("Credentials file error: %v\n", err)
+		}
+	case "aws":
+		fmt.Printf("AWS Region: %s\n", os.Getenv("AWS_DEFAULT_REGION"))
+		fmt.Printf("AWS Access Key ID: %s\n", os.Getenv("AWS_ACCESS_KEY_ID"))
+		fmt.Printf("AWS Secret Access Key: %s\n", os.Getenv("AWS_SECRET_ACCESS_KEY"))
+	default:
+		fmt.Printf("Unknown provider: %s\n", provider.GetName())
+	}
 
 	// Create a map to hold resources by region
 	resourcesByRegion := make(map[string][]terraformutils.Resource)
@@ -179,11 +185,12 @@ func generateTerraformCode(provider terraformutils.ProviderGenerator, region, ou
 	// Remove empty directories if no resources found
 	if !existingResourceFlag {
 		fmt.Printf("No resources found in any service for region: %s\n", region)
-		// err := os.RemoveAll(outputDir)
-		// if err != nil {
-		// 	fmt.Printf("Failed to remove directory: %v\n", err)
-		// }
-		// return nil
+		err := os.RemoveAll(outputDir)
+		fmt.Printf("Removed directory: %s\n", outputDir)
+		if err != nil {
+			fmt.Printf("Failed to remove directory: %v\n", err)
+		}
+		return nil
 	}
 
 	// Write resources to Terraform config files by region
@@ -193,7 +200,7 @@ func generateTerraformCode(provider terraformutils.ProviderGenerator, region, ou
 			return fmt.Errorf("failed to write Terraform config for region %s: %w", region, err)
 		}
 	}
-
+	fmt.Printf("Successfully processed region: %s\n", region)
 	return nil
 }
 
@@ -366,7 +373,6 @@ func processAWSAccount(account CloudAccount) error {
 			continue
 		}
 	}
-
 	return nil
 }
 
@@ -401,18 +407,31 @@ func processGCPAccount(account CloudAccount) error {
 	// Debug output
 	fmt.Printf("GCP Project Details:\n")
 	fmt.Printf("Project ID: %s\n", projectDetails.ProjectID)
-	fmt.Printf("Project Display Name: %s\n", projectDetails.DisplayName)
+	fmt.Printf("Project Name: %s\n", projectDetails.ProjectName)
 	fmt.Printf("Project Number: %s\n\n", projectDetails.ProjectNumber)
 
 	// Set GCP authentication environment variables
 	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", tempFile)
-	os.Setenv("GOOGLE_CLOUD_PROJECT", projectDetails.DisplayName)
+	os.Setenv("GOOGLE_CLOUD_PROJECT", projectDetails.ProjectID)
+
+	// Check prerequisites before proceeding
+	if err := checkPrerequisites(projectDetails.ProjectID, tempFile); err != nil {
+		fmt.Println("Prerequisites check failed!")
+		fmt.Println(err)
+		return fmt.Errorf("prerequisites not met")
+	}
+
+	fmt.Println("Prerequisites check passed. All required APIs are enabled.")
 
 	// Get list of GCP regions
 	regions := getGCPRegions()
 
 	// Generate Terraform code for each region
 	for _, region := range regions {
+		// Add delay between regions to avoid rate limiting
+		fmt.Println("Waiting between regions (5 seconds)...")
+		time.Sleep(5 * time.Second)
+
 		// Create output directory structure
 		outputDir := filepath.Join("generated", fmt.Sprintf("gcp-%s", account.ID), region)
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -434,7 +453,8 @@ func processGCPAccount(account CloudAccount) error {
 		cmd := exec.Command("terraform", "init")
 		cmd.Dir = outputDir
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to run terraform init: %v", err)
+			fmt.Printf("Error in region %s: failed to run terraform init: %v\n", region, err)
+			continue
 		}
 
 		// Initialize GCP provider with region
@@ -444,7 +464,7 @@ func processGCPAccount(account CloudAccount) error {
 		// Initialize provider with project details
 		err := provider.Init([]string{
 			region,                     // args[0]: Region
-			projectDetails.DisplayName, // args[1]: ProjectName
+			projectDetails.ProjectName, // args[1]: ProjectName
 			"",                         // args[2]: Empty for default provider type
 		})
 		if err != nil {
@@ -457,7 +477,6 @@ func processGCPAccount(account CloudAccount) error {
 			continue
 		}
 	}
-
 	return nil
 }
 
@@ -481,10 +500,138 @@ func getGCPProjectDetails(projectID string, credentialsFile string) (*ProviderDe
 	return &ProviderDetails{
 		Provider:       "gcp",
 		ProjectID:      projectID,
-		DisplayName:    project.DisplayName,
+		ProjectName:    project.DisplayName,
 		ProjectNumber:  projectNumber,
 		CredentialFile: credentialsFile,
 	}, nil
+}
+
+// requiredAPIs defines the list of APIs that need to be enabled
+var requiredAPIs = []string{
+	"compute.googleapis.com",              // Compute Engine API
+	"cloudresourcemanager.googleapis.com", // Cloud Resource Manager API
+}
+
+// checkPrerequisites checks if all required APIs are enabled
+func checkPrerequisites(projectID, credentialsFile string) error {
+	fmt.Println("Checking service account permissions...")
+	ctx := context.Background()
+
+	// Create service usage client
+	service, err := serviceusage.NewService(ctx, option.WithCredentialsFile(credentialsFile))
+	if err != nil {
+		return createDetailedError("Service Usage API access", err, []string{
+			"1. Verify that the service account has the 'Service Usage Viewer' role (roles/serviceusage.serviceUsageViewer)",
+			"2. Check if the credentials file is valid and not corrupted",
+			"3. Ensure the Service Usage API is enabled in your project",
+		})
+	}
+
+	var disabledAPIs []string
+	var failedChecks []apiCheckError
+
+	for _, apiName := range requiredAPIs {
+		// Check if API is enabled
+		name := fmt.Sprintf("projects/%s/services/%s", projectID, apiName)
+		svcState, err := service.Services.Get(name).Do()
+		if err != nil {
+			failedChecks = append(failedChecks, apiCheckError{
+				APIName: apiName,
+				Error:   err,
+			})
+			continue
+		}
+
+		if svcState.State != "ENABLED" {
+			disabledAPIs = append(disabledAPIs, apiName)
+		}
+	}
+
+	if len(failedChecks) > 0 || len(disabledAPIs) > 0 {
+		return generateErrorMessage(projectID, disabledAPIs, failedChecks)
+	}
+
+	return nil
+}
+
+type apiCheckError struct {
+	APIName string
+	Error   error
+}
+
+func generateErrorMessage(projectID string, disabledAPIs []string, failedChecks []apiCheckError) error {
+	var errMsg strings.Builder
+
+	// ヘッダー
+	errMsg.WriteString("=====================================\n")
+	errMsg.WriteString("GCP API Configuration Issues Detected\n")
+	errMsg.WriteString("=====================================\n\n")
+
+	// 失敗したチェックがある場合
+	if len(failedChecks) > 0 {
+		errMsg.WriteString("Failed API Checks:\n")
+		for _, check := range failedChecks {
+			errMsg.WriteString(fmt.Sprintf("\nAPI: %s\n", check.APIName))
+			errMsg.WriteString("Error: " + check.Error.Error() + "\n")
+
+			// エラータイプに基づいて具体的な解決手順を提供
+			if strings.Contains(check.Error.Error(), "permission denied") ||
+				strings.Contains(check.Error.Error(), "forbidden") {
+				errMsg.WriteString("\nRequired Actions (Permission Issue):\n")
+				errMsg.WriteString("1. Go to: https://console.cloud.google.com/iam-admin/iam\n")
+				errMsg.WriteString(fmt.Sprintf("2. Select project: %s\n", projectID))
+				errMsg.WriteString("3. Find your service account and add the following roles:\n")
+				errMsg.WriteString("   - Service Usage Viewer (roles/serviceusage.serviceUsageViewer)\n")
+				errMsg.WriteString("4. Wait 2-3 minutes for permissions to propagate\n")
+			} else if strings.Contains(check.Error.Error(), "accessNotConfigured") {
+				errMsg.WriteString("\nRequired Actions (API Not Enabled):\n")
+				errMsg.WriteString(fmt.Sprintf("1. Go to: https://console.cloud.google.com/apis/library/%s/overview?project=%s\n",
+					strings.TrimSuffix(check.APIName, ".googleapis.com"), projectID))
+				errMsg.WriteString("2. Click 'Enable'\n")
+				errMsg.WriteString("3. Wait 2-3 minutes for the API to be fully enabled\n")
+			}
+		}
+		errMsg.WriteString("\n")
+	}
+
+	// 無効なAPIがある場合
+	if len(disabledAPIs) > 0 {
+		errMsg.WriteString("Disabled APIs:\n")
+		for _, api := range disabledAPIs {
+			errMsg.WriteString(fmt.Sprintf("- %s\n", api))
+			errMsg.WriteString(fmt.Sprintf("  Enable at: https://console.cloud.google.com/apis/library/%s/overview?project=%s\n",
+				strings.TrimSuffix(api, ".googleapis.com"), projectID))
+		}
+		errMsg.WriteString("\n")
+	}
+
+	// 一般的な手順
+	errMsg.WriteString("General Troubleshooting Steps:\n")
+	errMsg.WriteString("1. Verify project ID and credentials are correct\n")
+	errMsg.WriteString("2. Ensure all required APIs are enabled\n")
+	errMsg.WriteString("3. Check service account permissions\n")
+	errMsg.WriteString("4. Wait a few minutes after making any changes\n")
+	errMsg.WriteString("5. If issues persist, check GCP Status Dashboard: https://status.cloud.google.com\n\n")
+
+	// ヘルプ情報
+	errMsg.WriteString("For more details, visit:\n")
+	errMsg.WriteString("- GCP IAM documentation: https://cloud.google.com/iam/docs\n")
+	errMsg.WriteString("- API enabling guide: https://cloud.google.com/apis/docs/getting-started\n")
+
+	return fmt.Errorf(errMsg.String())
+}
+
+func createDetailedError(context string, err error, steps []string) error {
+	var errMsg strings.Builder
+	errMsg.WriteString(fmt.Sprintf("Failed to %s:\n", context))
+	errMsg.WriteString(fmt.Sprintf("Error: %v\n\n", err))
+
+	errMsg.WriteString("Required Actions:\n")
+	for i, step := range steps {
+		errMsg.WriteString(fmt.Sprintf("%d. %s\n", i+1, step))
+	}
+
+	return fmt.Errorf(errMsg.String())
 }
 
 // Helper functions for region handling
@@ -653,7 +800,7 @@ variable "gcp_region" {
   description = "GCP region"
   type        = string
 }
-`, details.CredentialFile, details.ProjectID, details.DisplayName, details.ProjectNumber))
+`, details.CredentialFile, details.ProjectID, details.ProjectName, details.ProjectNumber))
 
 		// Add tfvars file for GCP
 		tfvars := fmt.Sprintf(`gcp_region = "%s"
