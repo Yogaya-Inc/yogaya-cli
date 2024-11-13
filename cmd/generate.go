@@ -251,15 +251,15 @@ func runTerraformerGCP(account CloudAccount) error {
 	log.Println("✅ Terraformer binary verified and executable")
 
 	// Setup global plugin directory and get cleanup function
-	cleanup, err := ensureGlobalPluginDirectory()
-	if err != nil {
-		return fmt.Errorf("failed to setup plugin directory: %v", err)
-	}
-	defer func() {
-		if err := cleanup(); err != nil {
-			log.Printf("⚠️ Warning: Error during cleanup: %v", err)
-		}
-	}()
+	// cleanup, err := ensureGlobalPluginDirectory()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to setup plugin directory: %v", err)
+	// }
+	// defer func() {
+	// 	if err := cleanup(); err != nil {
+	// 		log.Printf("⚠️ Warning: Error during cleanup: %v", err)
+	// 	}
+	// }()
 
 	// Process GCP credentials
 	log.Println("Processing GCP credentials...")
@@ -294,6 +294,31 @@ func runTerraformerGCP(account CloudAccount) error {
 		}
 	}()
 
+	baseOutputDir := fmt.Sprintf("generated/gcp-%s", account.ID)
+	if err := os.MkdirAll(baseOutputDir, 0755); err != nil {
+		return fmt.Errorf("error creating base output directory: %v", err)
+	}
+
+	mainTFContent := fmt.Sprintf(`
+	terraform {
+	  required_providers {
+		google = {
+		  source  = "hashicorp/google"
+		  version = "~> 4.84.0"
+		}
+	  }
+	  required_version = ">= 1.5.0"
+	}
+	
+	provider "google" {
+	  project = "%s"
+	}
+	`, gcpCloudCreds.ProjectID)
+
+	if err := os.WriteFile(filepath.Join(baseOutputDir, "main.tf"), []byte(mainTFContent), 0644); err != nil {
+		return fmt.Errorf("error writing global main.tf: %v", err)
+	}
+
 	// Write credentials to temporary file
 	gcpCredsJSON := fmt.Sprintf(`{
         "type": "service_account",
@@ -317,55 +342,75 @@ func runTerraformerGCP(account CloudAccount) error {
 	regions := getGCPRegions()
 	log.Printf("Processing %d GCP regions: %v", len(regions), regions)
 
+	// Initialize Terraform
+	log.Printf("Running terraform init in %s", baseOutputDir)
+	terraformInitCmd := exec.Command("terraform", "init")
+	terraformInitCmd.Dir = baseOutputDir
+	output, err := terraformInitCmd.CombinedOutput()
+	if err != nil {
+		log.Printf("Terraform init output:\n%s", string(output))
+		return fmt.Errorf("error running terraform init: %v", err)
+	}
+	log.Printf("Terraform init output:\n%s", string(output))
+	log.Printf("✅ Terraform initialization successful")
+
 	for i, region := range regions {
 		log.Printf("Processing region %d/%d: %s", i+1, len(regions), region)
 
 		// Create directory structure for region
-		outputDir := fmt.Sprintf("generated/gcp-%s/%s", account.ID, region)
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			return fmt.Errorf("❌ error creating directory for region %s: %v", region, err)
+		regionDir := filepath.Join(baseOutputDir, region)
+		if err := os.MkdirAll(regionDir, 0755); err != nil {
+			return fmt.Errorf("error creating directory for region %s: %v", region, err)
 		}
-		log.Printf("Created output directory: %s", outputDir)
+		log.Printf("Created output directory: %s", regionDir)
 
 		// Create main.tf with provider configuration
-		if err := createMainTF(outputDir, "google", gcpCloudCreds.ProjectID); err != nil {
-			return fmt.Errorf("❌ error creating main.tf: %v", err)
-		}
-		log.Printf("✅ Created main.tf file for region %s", region)
+		// mainTFContent := fmt.Sprintf(`
+		// terraform {
+		//   required_providers {
+		// 	google = {
+		// 	  source  = "hashicorp/google"
+		// 	  version = "~> 4.0"
+		// 	}
+		//   }
+		//   required_version = ">= 0.13"
+		// }
 
-		// Initialize Terraform
-		log.Printf("Running terraform init in %s", outputDir)
-		terraformInitCmd := exec.Command("terraform", "init")
-		terraformInitCmd.Dir = outputDir
-		if output, err := terraformInitCmd.CombinedOutput(); err != nil {
-			log.Printf("Terraform init output:\n%s", string(output))
-			return fmt.Errorf("❌ error running terraform init for GCP in region %s: %v", region, err)
-		}
-		log.Printf("✅ Terraform initialization successful for region %s", region)
+		// provider "google" {
+		//   project = "%s"
+		// }
+		// `, gcpCloudCreds.ProjectID)
+
+		// if err := os.WriteFile(filepath.Join(baseOutputDir, "main.tf"), []byte(mainTFContent), 0644); err != nil {
+		// 	return fmt.Errorf("error writing global main.tf: %v", err)
+		// }
+		// log.Printf("✅ Created main.tf file for region %s", region)
 
 		// Run Terraformer command
 		log.Printf("Running Terraformer import for GCP region %s", region)
 
-		pluginDir := filepath.Join(outputDir, ".terraform", "plugins")
-		if err := os.MkdirAll(pluginDir, 0755); err != nil {
-			return fmt.Errorf("error creating plugin directory: %v", err)
-		}
+		// pluginDir := filepath.Join(outputDir, ".terraform", "plugins")
+		// if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		// 	return fmt.Errorf("error creating plugin directory: %v", err)
+		// }
 
 		terraformImportCmd := exec.Command(terraformerPath, "import", "google",
-			"--resources=all",
+			"--resources=\"*\"",
 			"--regions="+region,
-			"--projects="+gcpCloudCreds.ProjectID)
+			"--projects="+gcpCloudCreds.ProjectID,
+			"--output="+regionDir)
 
-		terraformImportCmd.Dir = outputDir
+		terraformImportCmd.Dir = baseOutputDir
 		terraformImportCmd.Env = append(os.Environ(),
 			"GOOGLE_APPLICATION_CREDENTIALS="+tempFile.Name(),
-			"GOOGLE_CLOUD_PROJECT="+gcpCloudCreds.ProjectID,
-			"TF_PLUGIN_DIR="+pluginDir)
+			"GOOGLE_CLOUD_PROJECT="+gcpCloudCreds.ProjectID)
 
-		if output, err := terraformImportCmd.CombinedOutput(); err != nil {
+		output, err := terraformImportCmd.CombinedOutput()
+		if err != nil {
 			log.Printf("Terraformer output:\n%s", string(output))
 			return fmt.Errorf("❌ error running Terraformer for GCP in region %s: %v", region, err)
 		}
+		log.Printf("Terraformer output:\n%s", string(output))
 		log.Printf("✅ Successfully generated Terraform code for region %s", region)
 	}
 
