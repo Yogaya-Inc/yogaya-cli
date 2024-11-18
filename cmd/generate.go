@@ -4,6 +4,8 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/spf13/cobra"
@@ -152,7 +155,7 @@ func runTerraformerAWS(account CloudAccount) error {
 
 	// Define terraformer binary path relative to project root
 	terraformerPath := filepath.Join(projectDir, "bin", "terraformer")
-	log.Printf("Using Terraformer binary at: %s", terraformerPath)
+	// log.Printf("Using Terraformer binary at: %s", terraformerPath)
 
 	// Check if terraformer binary exists
 	if _, err := os.Stat(terraformerPath); err != nil {
@@ -163,7 +166,7 @@ func runTerraformerAWS(account CloudAccount) error {
 	if err := os.Chmod(terraformerPath, 0755); err != nil {
 		return fmt.Errorf("❌ failed to make terraformer binary executable: %v", err)
 	}
-	log.Println("✅ Terraformer binary verified and executable")
+	// log.Println("✅ Terraformer binary verified and executable")
 
 	// Process AWS credentials
 	log.Println("Processing AWS credentials...")
@@ -191,68 +194,119 @@ func runTerraformerAWS(account CloudAccount) error {
 		return fmt.Errorf("error creating base output directory: %v", err)
 	}
 
-	// Create global main.tf for shared configurations
-	if err := createMainTF("aws", baseOutputDir, ""); err != nil {
-		return fmt.Errorf("error writing global main.tf: %v", err)
-	}
-
 	// Get AWS regions
 	regions := getAWSRegions()
-	log.Printf("Processing %d AWS regions: %v", len(regions), regions)
+	// log.Printf("Processing %d AWS regions: %v\n", len(regions), regions)
 
-	// Initialize Terraform in base directory
-	log.Printf("Running terraform init in %s", baseOutputDir)
-	terraformInitCmd := exec.Command("terraform", "init")
-	terraformInitCmd.Dir = baseOutputDir
-	output, err := terraformInitCmd.CombinedOutput()
-	if err != nil {
-		log.Printf("Terraform init output:\n%s", string(output))
-		return fmt.Errorf("error running terraform init: %v", err)
-	}
-	log.Printf("✅ Terraform initialization successful")
+	// Define maximum number of concurrent workers
+	maxConcurrency := 5 // Max Threads
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex // To protect shared resources like log output
+	errors := []error{}
 
-	// Process each region
 	for i, region := range regions {
-		log.Printf("Processing region %d/%d: %s", i+1, len(regions), region)
+		wg.Add(1)
+		go func(region string, index int) {
+			defer wg.Done()
 
-		// Get available services for this region
-		services := getAvailableServicesForRegion(region)
-		if len(services) == 0 {
-			log.Printf("⚠️ No services configured for region %s, skipping", region)
-			continue
-		}
-		log.Printf("Found %d available services in region %s", len(services), region)
+			// Acquire a slot in the semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }() // Release the slot when done
 
-		// Create directory structure for region
-		regionDir := filepath.Join(baseOutputDir, region)
-		if err := os.MkdirAll(regionDir, 0755); err != nil {
-			return fmt.Errorf("error creating directory for region %s: %v", region, err)
-		}
-		log.Printf("Created output directory: %s", regionDir)
+			regionDir := filepath.Join(baseOutputDir, region)
+			if err := os.MkdirAll(regionDir, 0755); err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("error creating directory for region %s: %v", region, err))
+				mu.Unlock()
+				return
+			}
 
-		// Run Terraformer command for AWS region
-		log.Printf("Running Terraformer import for AWS region %s", region)
-		terraformerImportCmd := exec.Command(terraformerPath, "import", "aws",
-			"--resources=", strings.Join(services, ","),
-			"--regions", region,
-			"--access-key", accessKeyID,
-			"--secret-key", secretAccessKey,
-			"--path-output="+"./"+region)
+			if err := createMainTF("aws", regionDir, region); err != nil {
+				fmt.Printf("error writing global main.tf: %v", err)
+				return
+			}
 
-		terraformerImportCmd.Dir = baseOutputDir
-		terraformerImportCmd.Env = append(os.Environ(),
-			"AWS_ACCESS_KEY_ID="+accessKeyID,
-			"AWS_SECRET_ACCESS_KEY="+secretAccessKey)
+			log.Printf("Running terraform init in %s", regionDir)
+			terraformInitCmd := exec.Command("terraform", "init")
+			terraformInitCmd.Dir = regionDir
+			initOutput, err := terraformInitCmd.CombinedOutput()
+			if err != nil {
+				log.Printf("Terraform init output:\n%s", string(initOutput))
+				fmt.Printf("error running terraform init: %v", err)
+				return
+			}
+			// If there seems to be a problem with Terraform itself, enable it.
+			// log.Printf("Terraform init output:\n%s", string(initOutput))
+			// log.Printf("✅ Terraform initialization successful")
 
-		if output, err := terraformerImportCmd.CombinedOutput(); err != nil {
-			log.Printf("Terraformer import output for region %s:\n%s", region, string(output))
-			log.Printf("⚠️ Error in region %s: %v", region, err)
-			continue
-		}
-		// If there seems to be a problem with Terraformer itself, enable it.
-		// log.Printf("Terraformer import output:\n%s", string(output))
-		log.Printf("✅ Successfully generated Terraform code for region %s", region)
+			resources := getAvailableAWSServices()
+			// if len(services) == 0 {
+			// 	log.Printf("⚠️ No services configured for region %s, skipping", region)
+			// 	return
+			// }
+			terraformerImportCmd := exec.Command(terraformerPath, "import", "aws",
+				"--resources="+strings.Join(resources, ","),
+				"--regions="+region,
+				"--path-output=./")
+			terraformerImportCmd.Dir = regionDir
+			terraformerImportCmd.Env = append(os.Environ(),
+				"AWS_ACCESS_KEY_ID="+accessKeyID,
+				"AWS_SECRET_ACCESS_KEY="+secretAccessKey)
+
+			importOutput, err := terraformerImportCmd.CombinedOutput()
+			if err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("error running Terraformer for region %s: %v\nOutput: %s", region, err, string(importOutput)))
+				mu.Unlock()
+				return
+			}
+
+			// for _, service := range services {
+			// terraformerImportCmd := exec.Command(terraformerPath, "import", "aws",
+			// 	"--resources="+service,
+			// 	"--regions="+region,
+			// 	"--path-output=./")
+			// terraformerImportCmd.Dir = regionDir
+			// terraformerImportCmd.Env = append(os.Environ(),
+			// 	"AWS_ACCESS_KEY_ID="+accessKeyID,
+			// 	"AWS_SECRET_ACCESS_KEY="+secretAccessKey)
+
+			// importOutput, err := terraformerImportCmd.CombinedOutput()
+			// if err != nil {
+			// 	mu.Lock()
+			// 	errors = append(errors, fmt.Errorf("error running Terraformer for region %s: %v\nOutput: %s", region, err, string(importOutput)))
+			// 	mu.Unlock()
+			// 	return
+			// }
+			// If there seems to be a problem with Terraformer itself, enable it.
+			// log.Printf("Terraformer import output:\n%s", string(importOutput))
+			// }
+
+			// if err := mergeFilesOfRefion(baseOutputDir, "aws"); err != nil {
+			// 	fmt.Printf("Internal error: %v\n", err)
+			// }
+
+			mergeFilesOfRefion(baseOutputDir, "aws")
+
+			os.RemoveAll(filepath.Join(regionDir, ".terraform"))
+			os.Remove(filepath.Join(regionDir, "main.tf"))
+			os.Remove(filepath.Join(regionDir, ".terraform.lock.hcl"))
+
+			log.Printf("✅ Successfully generated Terraform code for region %s", region)
+		}(region, i)
 	}
+
+	wg.Wait()
+
+	// Handle errors after all regions are processed
+	if len(errors) > 0 {
+		return fmt.Errorf("encountered errors during AWS Terraformer process: %v", errors)
+	}
+
+	os.Remove("generated/all_resources_in_generated.tf")
+	os.Remove("./all_resources_in_..tf")
+
 	log.Printf("✅ Completed AWS Terraformer process for account: %s", account.ID)
 	return nil
 }
@@ -269,7 +323,7 @@ func runTerraformerGCP(account CloudAccount) error {
 
 	// Define terraformer binary path relative to project root
 	terraformerPath := filepath.Join(projectDir, "bin", "terraformer")
-	log.Printf("Using Terraformer binary at: %s", terraformerPath)
+	// log.Printf("Using Terraformer binary at: %s", terraformerPath)
 
 	// Check if terraformer binary exists
 	if _, err := os.Stat(terraformerPath); err != nil {
@@ -280,7 +334,7 @@ func runTerraformerGCP(account CloudAccount) error {
 	if err := os.Chmod(terraformerPath, 0755); err != nil {
 		return fmt.Errorf("❌ failed to make terraformer binary executable: %v", err)
 	}
-	log.Println("✅ Terraformer binary verified and executable")
+	// log.Println("✅ Terraformer binary verified and executable")
 
 	// Process GCP credentials
 	log.Println("Processing GCP credentials...")
@@ -344,58 +398,420 @@ func runTerraformerGCP(account CloudAccount) error {
 	}
 	log.Printf("✅ Created temporary credentials file at: %s", tempFile.Name())
 
-	regions := getGCPRegions()
-	log.Printf("Processing %d GCP regions: %v", len(regions), regions)
-
 	// Initialize Terraform in base directory
 	log.Printf("Running terraform init in %s", baseOutputDir)
 	terraformInitCmd := exec.Command("terraform", "init")
 	terraformInitCmd.Dir = baseOutputDir
-	output, err := terraformInitCmd.CombinedOutput()
+	initOutput, err := terraformInitCmd.CombinedOutput()
 	if err != nil {
-		log.Printf("Terraform init output:\n%s", string(output))
+		log.Printf("Terraform init output:\n%s", string(initOutput))
 		return fmt.Errorf("error running terraform init: %v", err)
 	}
 	// If there seems to be a problem with Terraform itself, enable it.
-	// log.Printf("Terraform init output:\n%s", string(output))
-	log.Printf("✅ Terraform initialization successful")
+	// log.Printf("Terraform init output:\n%s", string(initOutput))
+	// log.Printf("✅ Terraform initialization successful")
+
+	// regions := []string{"asia-southeast2"}
+	terraformerImportRegionsListCmd := exec.Command("gcloud", "compute", "regions", "list")
+	terraformerImportRegionsListCmd.Dir = baseOutputDir
+	terraformerImportRegionsListCmd.Env = append(os.Environ(),
+		"GOOGLE_APPLICATION_CREDENTIALS="+tempFile.Name(),
+		"GOOGLE_CLOUD_PROJECT="+gcpCloudCreds.ProjectID,
+		"CLOUDSDK_CORE_PROJECT="+gcpCloudCreds.ProjectID)
+	importRegionsListOutput, err := terraformerImportRegionsListCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("Error in getting GCP services that Terraformer supports regions importing: Output: %s", importRegionsListOutput)
+	}
+	regions := getGCPRegions(importRegionsListOutput)
+	// log.Printf("Processing %d GCP regions: %v", len(regions), regions)
+
+	// Define maximum number of concurrent workers
+	maxConcurrency := 5 // Max Threads
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex // To protect shared resources like log output
+	errors := []error{}
+
+	outputCompletedServiceCount := 0
+
+	terraformerImportResourcesListCmd := exec.Command("gcloud", "asset", "list", "--project="+gcpCloudCreds.ProjectID, "--format=json")
+	terraformerImportResourcesListCmd.Dir = baseOutputDir
+	terraformerImportResourcesListCmd.Env = append(os.Environ(),
+		"GOOGLE_APPLICATION_CREDENTIALS="+tempFile.Name(),
+		"GOOGLE_CLOUD_PROJECT="+gcpCloudCreds.ProjectID)
+	importListOutput, err := terraformerImportResourcesListCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("Error in getting GCP services that Terraformer supports importing: Output: %s", importListOutput)
+	}
+
+	var assets []Asset
+	if err := json.Unmarshal(importListOutput, &assets); err != nil {
+		fmt.Printf("Error parsing target resources name: %v\n", err)
+	}
+
+	resourceMap := make(map[string]struct{})
+
+	for _, asset := range assets {
+		if resource := convertToTerraformerResource(asset.AssetType); resource != "" {
+			resourceMap[resource] = struct{}{}
+		}
+	}
+
+	var resources []string
+	for resource := range resourceMap {
+		if resource == "cloudFunctions" {
+			continue
+		}
+		resources = append(resources, resource)
+	}
 
 	for i, region := range regions {
-		log.Printf("Processing region %d/%d: %s", i+1, len(regions), region)
+		wg.Add(1)
+		go func(region string, index int) {
+			defer wg.Done()
 
-		// Create directory structure for region
-		regionDir := filepath.Join(baseOutputDir, region)
-		if err := os.MkdirAll(regionDir, 0755); err != nil {
-			return fmt.Errorf("error creating directory for region %s: %v", region, err)
-		}
-		log.Printf("Created output directory: %s", regionDir)
+			// Acquire a slot in the semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }() // Release the slot when done
 
-		// Run Terraformer command
-		log.Printf("Running Terraformer import for GCP region %s", region)
+			regionDir := filepath.Join(baseOutputDir, region)
+			if err := os.MkdirAll(regionDir, 0755); err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("error creating directory for region %s: %v", region, err))
+				mu.Unlock()
+				return
+			}
 
-		terraformerImportCmd := exec.Command(terraformerPath, "import", "google",
-			"--resources=\"*\"",
-			"--regions="+region,
-			"--projects="+gcpCloudCreds.ProjectID,
-			"--path-output="+"./"+region)
+			terraformerImportCmd := exec.Command(terraformerPath, "import", "google",
+				"--resources="+strings.Join(resources, ","),
+				"--regions="+region,
+				"--projects="+gcpCloudCreds.ProjectID,
+				"--path-output=./"+region)
+			terraformerImportCmd.Dir = baseOutputDir
+			terraformerImportCmd.Env = append(os.Environ(),
+				"GOOGLE_APPLICATION_CREDENTIALS="+tempFile.Name(),
+				"GOOGLE_CLOUD_PROJECT="+gcpCloudCreds.ProjectID)
 
-		terraformerImportCmd.Dir = baseOutputDir
-		terraformerImportCmd.Env = append(os.Environ(),
-			"GOOGLE_APPLICATION_CREDENTIALS="+tempFile.Name(),
-			"GOOGLE_CLOUD_PROJECT="+gcpCloudCreds.ProjectID)
+			importOutput, err := terraformerImportCmd.CombinedOutput()
+			// fmt.Printf("importOutput\n%v", string(importOutput))
+			if err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("error running Terraformer for GCP region %s: %v\nOutput: %s", region, err, string(importOutput)))
+				mu.Unlock()
+				return
+			}
 
-		output, err := terraformerImportCmd.CombinedOutput()
-		if err != nil {
-			log.Printf("Terraformer import output:\n%s", string(output))
-			return fmt.Errorf("❌ error running Terraformer for GCP in region %s: %v", region, err)
-		}
-		// If there seems to be a problem with Terraformer itself, enable it.
-		// log.Printf("Terraformer import output:\n%s", string(output))
-		log.Printf("✅ Successfully generated Terraform code for region %s", region)
+			// for _, service := range services {
+			// 	if service == "cloudFunctions" {
+			// 		continue
+			// 	}
+			// 	// fmt.Printf("Service name:%v\n", service)
+			// 	terraformerImportCmd := exec.Command(terraformerPath, "import", "google",
+			// 		"--resources="+service,
+			// 		"--regions="+region,
+			// 		"--projects="+gcpCloudCreds.ProjectID,
+			// 		"--path-output=./"+region)
+			// 	terraformerImportCmd.Dir = baseOutputDir
+			// 	terraformerImportCmd.Env = append(os.Environ(),
+			// 		"GOOGLE_APPLICATION_CREDENTIALS="+tempFile.Name(),
+			// 		"GOOGLE_CLOUD_PROJECT="+gcpCloudCreds.ProjectID)
+
+			// 	importOutput, err := terraformerImportCmd.CombinedOutput()
+			// 	// fmt.Printf("importOutput\n%v", string(importOutput))
+			// 	if err != nil {
+			// 		mu.Lock()
+			// 		errors = append(errors, fmt.Errorf("error running Terraformer for GCP region %s: %v\nOutput: %s", region, err, string(importOutput)))
+			// 		mu.Unlock()
+			// 		return
+			// 	}
+			// }
+
+			if err := mergeFilesOfRefion(baseOutputDir, "google"); err != nil {
+				fmt.Printf("Internal error: %v\n", err)
+			}
+
+			// if err := removedWorkDir(filepath.Join(baseOutputDir, "all_resources_in_gcp-"+account.ID+".tf"), regionDir, "google"); err != nil {
+			// 	fmt.Printf("Internal error: %v\n", err)
+			// }
+			removedWorkDir(filepath.Join(baseOutputDir, "all_resources_in_gcp-"+account.ID+".tf"), regionDir, "google")
+
+			os.RemoveAll(filepath.Join(baseOutputDir, ".terraform"))
+
+			os.Remove(filepath.Join(baseOutputDir, ".terraform.lock.hcl"))
+
+			os.Remove(filepath.Join(baseOutputDir, "main.tf"))
+
+			outputCompletedServiceCount++
+			log.Printf("✅ Successfully generated Terraform code for region %s (%v/%v)", region, outputCompletedServiceCount, len(regions))
+		}(region, i)
+	}
+
+	wg.Wait()
+
+	// Handle errors after all regions are processed
+	if len(errors) > 0 {
+		return fmt.Errorf("encountered errors during GCP Terraformer process: %v", errors)
 	}
 
 	log.Printf("✅ Completed GCP Terraformer process for account: %s", account.ID)
 	return nil
+}
+
+func removedWorkDir(workingFile, regionDir, provider string) error {
+	workingDir := filepath.Join(regionDir, provider)
+	// Remove the work directory
+	// if err := os.RemoveAll(workingDir); err != nil {
+	// 	return fmt.Errorf("error removing work directory %s: %v", workingDir, err)
+	// }
+	os.RemoveAll(workingDir)
+
+	// if err := os.Remove(workingFile); err != nil {
+	// 	return fmt.Errorf("error removing work file %s: %v", workingFile, err)
+	// }
+	os.Remove(workingFile)
+
+	return nil
+}
+
+// mergeFiles consolidates all `.tf` files in the specified directory into a single output file.
+func mergeFiles(regionDir, outputFileName string) error {
+	var providerContent strings.Builder
+	var outputContent strings.Builder
+	var resourceContent strings.Builder
+	var providerWritten, outputWritten bool // Flags to ensure single inclusion of provider and output sections
+
+	// Walk through all `.tf` files in the directory and its subdirectories
+	err := filepath.Walk(regionDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return fmt.Errorf("error accessing path %s: %w", path, err)
+		}
+
+		// Skip directories and the output file itself
+		if info.IsDir() || filepath.Base(path) == outputFileName {
+			return nil
+		}
+
+		// Skip files matching the `all_resources_in_*` pattern
+		if strings.HasPrefix(filepath.Base(path), "all_resources_in_") {
+			return nil
+		}
+
+		// Process only `.tf` files
+		if strings.HasSuffix(path, ".tf") {
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("failed to read file %s: %w", path, err)
+			}
+
+			switch filepath.Base(path) {
+			case "provider.tf":
+				// Add provider.tf content if not already included
+				if !providerWritten {
+					providerContent.Write(content)
+					providerContent.WriteString("\n") // Add spacing
+					providerWritten = true
+				}
+			case "output.tf":
+				// Add output.tf content if not already included
+				if !outputWritten {
+					outputContent.Write(content)
+					outputContent.WriteString("\n") // Add spacing
+					outputWritten = true
+				}
+			default:
+				// Add all other `.tf` files to resourceContent
+				resourceContent.WriteString(fmt.Sprintf("# Start of %s\n\n", filepath.Base(path)))
+				resourceContent.Write(content)
+				resourceContent.WriteString(fmt.Sprintf("\n# End of %s\n\n", filepath.Base(path)))
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// Combine all content into the final file
+	var mergedContent strings.Builder
+	if providerContent.Len() > 0 {
+		mergedContent.WriteString("# Provider Definitions\n\n")
+		mergedContent.WriteString(providerContent.String())
+	}
+	if outputContent.Len() > 0 {
+		mergedContent.WriteString("# Output Definitions\n\n")
+		mergedContent.WriteString(outputContent.String())
+	}
+	if resourceContent.Len() > 0 {
+		mergedContent.WriteString("# Resource Definitions\n\n")
+		mergedContent.WriteString(resourceContent.String())
+	}
+
+	// Write the merged content to the specified output file
+	outputFilePath := filepath.Join(regionDir, outputFileName)
+	err = os.WriteFile(outputFilePath, []byte(mergedContent.String()), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write merged file to %s: %w", outputFilePath, err)
+	}
+
+	// fmt.Printf("Successfully merged files into %s\n", outputFilePath)
+	return nil
+}
+
+// processRegions consolidates Terraform files in each region directory into a single file.
+func mergeFilesOfRefion(baseDir, provider string) error {
+	// Walk through all directories within the base directory
+	err := filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return fmt.Errorf("error accessing path %s: %w", path, err)
+		}
+
+		// Process only region directories with `<region>/google/<project-id>` structure
+		if info.IsDir() && strings.Contains(path, provider) && !strings.Contains(path, ".terraform") {
+			projectDir := filepath.Dir(path) // Get project directory
+			regionDir := filepath.Dir(projectDir)
+			region := filepath.Base(regionDir)
+			outputFileName := fmt.Sprintf("all_resources_in_%s.tf", region)
+
+			err = mergeFiles(regionDir, outputFileName)
+			if err != nil {
+				return fmt.Errorf("error merging files in region directory %s: %w", regionDir, err)
+			}
+		}
+		return nil
+	})
+	return err
+}
+
+// Asset represents the structure of a GCP asset
+type Asset struct {
+	AssetType string `json:"assetType"`
+	Name      string `json:"name"`
+}
+
+// getResourceTypeMapping returns a map of GCP asset types to Terraformer resource types
+func getResourceTypeMapping() map[string]string {
+	return map[string]string{
+		// Compute Engine
+		"compute.googleapis.com/Address":                    "addresses",
+		"compute.googleapis.com/GlobalAddress":              "globalAddresses",
+		"compute.googleapis.com/Autoscaler":                 "autoscalers",
+		"compute.googleapis.com/RegionAutoscaler":           "regionAutoscalers",
+		"compute.googleapis.com/BackendBucket":              "backendBuckets",
+		"compute.googleapis.com/BackendService":             "backendServices",
+		"compute.googleapis.com/RegionBackendService":       "regionBackendServices",
+		"compute.googleapis.com/Disk":                       "disks",
+		"compute.googleapis.com/RegionDisk":                 "regionDisks",
+		"compute.googleapis.com/Firewall":                   "firewall",
+		"compute.googleapis.com/ForwardingRule":             "forwardingRules",
+		"compute.googleapis.com/GlobalForwardingRule":       "globalForwardingRules",
+		"compute.googleapis.com/HealthCheck":                "healthChecks",
+		"compute.googleapis.com/RegionHealthCheck":          "regionHealthChecks",
+		"compute.googleapis.com/HttpHealthCheck":            "httpHealthChecks",
+		"compute.googleapis.com/HttpsHealthCheck":           "httpsHealthChecks",
+		"compute.googleapis.com/Image":                      "images",
+		"compute.googleapis.com/Instance":                   "instances",
+		"compute.googleapis.com/InstanceGroup":              "instanceGroups",
+		"compute.googleapis.com/RegionInstanceGroup":        "regionInstanceGroups",
+		"compute.googleapis.com/InstanceGroupManager":       "instanceGroupManagers",
+		"compute.googleapis.com/RegionInstanceGroupManager": "regionInstanceGroupManagers",
+		"compute.googleapis.com/InstanceTemplate":           "instanceTemplates",
+		"compute.googleapis.com/Network":                    "networks",
+		"compute.googleapis.com/NetworkEndpointGroup":       "networkEndpointGroups",
+		"compute.googleapis.com/NodeGroup":                  "nodeGroups",
+		"compute.googleapis.com/NodeTemplate":               "nodeTemplates",
+		"compute.googleapis.com/PacketMirroring":            "packetMirrorings",
+		"compute.googleapis.com/Reservation":                "reservations",
+		"compute.googleapis.com/ResourcePolicy":             "resourcePolicies",
+		"compute.googleapis.com/Route":                      "routes",
+		"compute.googleapis.com/Router":                     "routers",
+		"compute.googleapis.com/SecurityPolicy":             "securityPolicies",
+		"compute.googleapis.com/SslCertificate":             "sslCertificates",
+		"compute.googleapis.com/RegionSslCertificate":       "regionSslCertificates",
+		"compute.googleapis.com/SslPolicy":                  "sslPolicies",
+		"compute.googleapis.com/Subnetwork":                 "subnetworks",
+		"compute.googleapis.com/TargetHttpProxy":            "targetHttpProxies",
+		"compute.googleapis.com/RegionTargetHttpProxy":      "regionTargetHttpProxies",
+		"compute.googleapis.com/TargetHttpsProxy":           "targetHttpsProxies",
+		"compute.googleapis.com/RegionTargetHttpsProxy":     "regionTargetHttpsProxies",
+		"compute.googleapis.com/TargetInstance":             "targetInstances",
+		"compute.googleapis.com/TargetPool":                 "targetPools",
+		"compute.googleapis.com/TargetSslProxy":             "targetSslProxies",
+		"compute.googleapis.com/TargetTcpProxy":             "targetTcpProxies",
+		"compute.googleapis.com/TargetVpnGateway":           "targetVpnGateways",
+		"compute.googleapis.com/UrlMap":                     "urlMaps",
+		"compute.googleapis.com/RegionUrlMap":               "regionUrlMaps",
+		"compute.googleapis.com/VpnTunnel":                  "vpnTunnels",
+		"compute.googleapis.com/ExternalVpnGateway":         "externalVpnGateways",
+		"compute.googleapis.com/InterconnectAttachment":     "interconnectAttachments",
+
+		// Cloud Storage
+		"storage.googleapis.com/Bucket": "gcs",
+
+		// BigQuery
+		"bigquery.googleapis.com/Dataset": "bigQuery",
+		"bigquery.googleapis.com/Table":   "bigQuery",
+
+		// Cloud Functions
+		"cloudfunctions.googleapis.com/Function": "cloudFunctions",
+
+		// Cloud Build
+		"cloudbuild.googleapis.com/Trigger": "cloudbuild",
+
+		// Cloud SQL
+		"sql.googleapis.com/Instance": "cloudsql",
+
+		// Cloud Tasks
+		"cloudtasks.googleapis.com/Queue": "cloudtasks",
+
+		// Dataproc
+		"dataproc.googleapis.com/Cluster": "dataProc",
+
+		// GKE
+		"container.googleapis.com/Cluster": "gke",
+
+		// IAM
+		"iam.googleapis.com/ServiceAccount": "iam",
+		"iam.googleapis.com/Role":           "iam",
+
+		// Cloud DNS
+		"dns.googleapis.com/ManagedZone": "dns",
+
+		// Cloud KMS
+		"cloudkms.googleapis.com/KeyRing":   "kms",
+		"cloudkms.googleapis.com/CryptoKey": "kms",
+
+		// Cloud Logging
+		"logging.googleapis.com/LogMetric": "logging",
+		"logging.googleapis.com/LogSink":   "logging",
+		"logging.googleapis.com/LogBucket": "logging",
+
+		// Memorystore
+		"redis.googleapis.com/Instance": "memoryStore",
+
+		// Cloud Monitoring
+		"monitoring.googleapis.com/AlertPolicy":         "monitoring",
+		"monitoring.googleapis.com/NotificationChannel": "monitoring",
+
+		// Cloud Pub/Sub
+		"pubsub.googleapis.com/Topic":        "pubsub",
+		"pubsub.googleapis.com/Subscription": "pubsub",
+
+		// Project
+		"cloudresourcemanager.googleapis.com/Project": "project",
+
+		// Cloud Scheduler
+		"cloudscheduler.googleapis.com/Job": "schedulerJobs",
+	}
+}
+
+// convertToTerraformerResource converts GCP asset type to Terraformer resource type
+func convertToTerraformerResource(assetType string) string {
+	resourceTypeMapping := getResourceTypeMapping()
+	if resource, ok := resourceTypeMapping[assetType]; ok {
+		return resource
+	}
+	return ""
 }
 
 // escapeNewlines escapes newlines in the private key so that it can be inserted into a JSON string
@@ -412,15 +828,15 @@ func createMainTF(provider, dir, fileAttributes string) error {
 		mainTFContent = fmt.Sprintf(`
 terraform {
 	required_providers {
-		google = {
+		google-beta = {
 			source  = "hashicorp/google"
-			version = "~> 4.0.0"
+			version = "4.0.0"
 		}
 	}
-	required_version = ">= 1.9.8"
+	required_version = ">= 0.13"
 }
 
-provider "google" {
+provider "google-beta" {
 	project = "%s"
 }
 `, fileAttributes)
@@ -462,34 +878,81 @@ func isValidRegionFormat(provider, region string) bool {
 // getAWSRegions is a wrapper function that tries different methods to get regions
 func getAWSRegions() []string {
 	// Try fetching regions dynamically first
-	regions, err := fetchAWSRegions()
-	if err != nil || len(regions) == 0 {
-		// Return hardcoded list as last resort
-		return []string{
-			"us-east-1",
-			"us-east-2",
-			"us-west-1",
-			"us-west-2",
-			"af-south-1",
-			"ap-east-1",
-			"ap-northeast-1",
-			"ap-northeast-2",
-			"ap-northeast-3",
-			"ap-southeast-1",
-			"ap-southeast-2",
-			"ap-south-1",
-			"ca-central-1",
-			"eu-central-1",
-			"eu-west-1",
-			"eu-west-2",
-			"eu-west-3",
-			"eu-north-1",
-			"me-south-1",
-			"sa-east-1",
-		}
-	}
+	// regions, err := fetchAWSRegions()
+	// if err != nil || len(regions) == 0 {
+	// Return hardcoded list as last resort
+	// return []string{
+	// 	"us-east-1",
+	// 	"us-east-2",
+	// 	"us-west-1",
+	// 	"us-west-2",
+	// 	"af-south-1",
+	// 	"ap-east-1",
+	// 	"ap-south-2",
+	// 	"ap-southeast-3",
+	// 	"ap-southeast-5",
+	// 	"ap-southeast-4",
+	// 	"ap-south-1",
+	// 	"ap-northeast-3",
+	// 	"ap-northeast-2",
+	// 	"ap-southeast-1",
+	// 	"ap-southeast-2",
+	// 	"ap-northeast-1",
+	// 	"ca-central-1",
+	// 	"ca-west-1",
+	// 	"cn-north-1",
+	// 	"cn-northwest-1",
+	// 	"eu-central-1",
+	// 	"eu-west-1",
+	// 	"eu-west-2",
+	// 	"eu-south-1",
+	// 	"eu-west-3",
+	// 	"eu-south-2",
+	// 	"eu-north-1",
+	// 	"eu-central-2",
+	// 	"il-central-1",
+	// 	"me-south-1",
+	// 	"me-central-1",
+	// 	"sa-east-1",
+	// }
+	// }
 
-	return regions
+	// return regions
+
+	return []string{
+		"us-east-1",
+		"us-east-2",
+		"us-west-1",
+		"us-west-2",
+		"af-south-1",
+		"ap-east-1",
+		"ap-south-2",
+		"ap-southeast-3",
+		"ap-southeast-5",
+		"ap-southeast-4",
+		"ap-south-1",
+		"ap-northeast-3",
+		"ap-northeast-2",
+		"ap-southeast-1",
+		"ap-southeast-2",
+		"ap-northeast-1",
+		"ca-central-1",
+		"ca-west-1",
+		"cn-north-1",
+		"cn-northwest-1",
+		"eu-central-1",
+		"eu-west-1",
+		"eu-west-2",
+		"eu-south-1",
+		"eu-west-3",
+		"eu-south-2",
+		"eu-north-1",
+		"eu-central-2",
+		"il-central-1",
+		"me-south-1",
+		"me-central-1",
+		"sa-east-1",
+	}
 }
 
 // fetchAWSRegions retrieves the list of available AWS regions dynamically
@@ -545,97 +1008,26 @@ func fetchAWSRegions() ([]string, error) {
 	return regions, nil
 }
 
-// getGCPRegions is a wrapper function that tries different methods to get regions
-func getGCPRegions() []string {
-	// Try fetching regions dynamically first
-	regions, err := fetchGCPRegions()
-	if err != nil || len(regions) == 0 {
-		// Return hardcoded list as last resort
-		return []string{
-			"asia-east1",
-			"asia-east2",
-			"asia-northeast1",
-			"asia-northeast2",
-			"asia-northeast3",
-			"asia-south1",
-			"asia-southeast1",
-			"australia-southeast1",
-			"europe-central2",
-			"europe-north1",
-			"europe-west1",
-			"europe-west2",
-			"europe-west3",
-			"europe-west4",
-			"europe-west6",
-			"northamerica-northeast1",
-			"southamerica-east1",
-			"us-central1",
-			"us-east1",
-			"us-east4",
-			"us-west1",
-			"us-west2",
-			"us-west3",
-			"us-west4",
+func getGCPRegions(output []byte) []string {
+	var regions []string
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+
+	// skip header
+	scanner.Scan()
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			regions = append(regions, fields[0])
 		}
 	}
 
 	return regions
-}
-
-// fetchGCPRegions retrieves the list of available GCP regions dynamically
-func fetchGCPRegions() ([]string, error) {
-	// GCP regions documentation URL
-	url := "https://cloud.google.com/compute/docs/regions-zones"
-
-	// Send HTTP GET request
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch GCP regions: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch GCP regions: received status code %d", resp.StatusCode)
-	}
-
-	// Parse HTML using goquery
-	// Parse HTML using goquery
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse HTML: %v", err)
-	}
-
-	// Use a map to store unique regions and avoid duplicates
-	regionMap := make(map[string]bool)
-
-	// Select the table or element containing the region data
-	doc.Find("table").Each(func(i int, s *goquery.Selection) {
-		// Find table rows and extract region names
-		s.Find("tr").Each(func(j int, row *goquery.Selection) {
-			region := row.Find("td").First().Text()
-			region = strings.TrimSpace(region)
-
-			// Filter and validate regions
-			if region != "" && !strings.Contains(region, "Zone") && isValidRegionFormat("gcp", region) {
-				regionMap[region] = true
-			}
-		})
-	})
-
-	// Convert map to sorted slice
-	regions := make([]string, 0, len(regionMap))
-	for region := range regionMap {
-		regions = append(regions, region)
-	}
-	sort.Strings(regions)
-
-	// Validate results
-	if len(regions) == 0 {
-		return nil, fmt.Errorf("no valid GCP regions found")
-	}
-
-	log.Printf("Found %d GCP regions", len(regions))
-	return regions, nil
 }
 
 // ServiceGroup defines a group of AWS services that can be imported
@@ -646,45 +1038,39 @@ type ServiceGroup struct {
 }
 
 // AWS Regions as of April 2024
-var commercialRegions = []string{
-	// Americas
-	"us-east-1",    // US East (N. Virginia)
-	"us-east-2",    // US East (Ohio)
-	"us-west-1",    // US West (N. California)
-	"us-west-2",    // US West (Oregon)
-	"ca-central-1", // Canada (Central)
-	"ca-west-1",    // Canada West (Calgary)
-	"sa-east-1",    // South America (São Paulo)
-
-	// Europe
-	"eu-central-1", // Europe (Frankfurt)
-	"eu-central-2", // Europe (Zurich)
-	"eu-west-1",    // Europe (Ireland)
-	"eu-west-2",    // Europe (London)
-	"eu-west-3",    // Europe (Paris)
-	"eu-south-1",   // Europe (Milan)
-	"eu-south-2",   // Europe (Spain)
-	"eu-north-1",   // Europe (Stockholm)
-
-	// Asia Pacific
-	"ap-east-1",      // Asia Pacific (Hong Kong)
-	"ap-south-1",     // Asia Pacific (Mumbai)
-	"ap-south-2",     // Asia Pacific (Hyderabad)
-	"ap-southeast-1", // Asia Pacific (Singapore)
-	"ap-southeast-2", // Asia Pacific (Sydney)
-	"ap-southeast-3", // Asia Pacific (Jakarta)
-	"ap-southeast-4", // Asia Pacific (Melbourne)
-	"ap-northeast-1", // Asia Pacific (Tokyo)
-	"ap-northeast-2", // Asia Pacific (Seoul)
-	"ap-northeast-3", // Asia Pacific (Osaka)
-
-	// Middle East and Africa
-	"me-central-1", // Middle East (UAE)
-	"me-south-1",   // Middle East (Bahrain)
-	"af-south-1",   // Africa (Cape Town)
-
-	// Special Regions
-	"il-central-1", // Israel (Tel Aviv)
+var commercialAWSRegions = []string{
+	"us-east-1",
+	"us-east-2",
+	"us-west-1",
+	"us-west-2",
+	"af-south-1",
+	"ap-east-1",
+	"ap-south-2",
+	"ap-southeast-3",
+	"ap-southeast-5",
+	"ap-southeast-4",
+	"ap-south-1",
+	"ap-northeast-3",
+	"ap-northeast-2",
+	"ap-southeast-1",
+	"ap-southeast-2",
+	"ap-northeast-1",
+	"ca-central-1",
+	"ca-west-1",
+	"cn-north-1",
+	"cn-northwest-1",
+	"eu-central-1",
+	"eu-west-1",
+	"eu-west-2",
+	"eu-south-1",
+	"eu-west-3",
+	"eu-south-2",
+	"eu-north-1",
+	"eu-central-2",
+	"il-central-1",
+	"me-south-1",
+	"me-central-1",
+	"sa-east-1",
 }
 
 // Define service groups based on availability and characteristics for 2024
@@ -710,14 +1096,14 @@ var awsServiceGroups = []ServiceGroup{
 		Services: []string{
 			"auto_scaling", "lambda", "eks", "ecs", "ecr",
 		},
-		Regions: commercialRegions,
+		Regions: commercialAWSRegions,
 	},
 	{
 		Name: "Storage",
 		Services: []string{
 			"s3", "efs", "fsx",
 		},
-		Regions: commercialRegions,
+		Regions: commercialAWSRegions,
 	},
 	{
 		Name: "Database",
@@ -725,7 +1111,7 @@ var awsServiceGroups = []ServiceGroup{
 			"rds", "dynamodb", "elasticache",
 			"docdb", "memorydb",
 		},
-		Regions: filterRegions(commercialRegions, []string{
+		Regions: filterRegions(commercialAWSRegions, []string{
 			"ap-northeast-3", // Limited service availability
 			"ap-southeast-3",
 			"ap-southeast-4",
@@ -742,7 +1128,7 @@ var awsServiceGroups = []ServiceGroup{
 			"alb", "elb", "cloudfront", "route53",
 			"globalaccelerator", "api_gateway",
 		},
-		Regions: commercialRegions,
+		Regions: commercialAWSRegions,
 	},
 	{
 		Name: "Analytics and Messaging",
@@ -750,7 +1136,7 @@ var awsServiceGroups = []ServiceGroup{
 			"sns", "sqs", "kinesis", "msk",
 			"emr",
 		},
-		Regions: filterRegions(commercialRegions, []string{
+		Regions: filterRegions(commercialAWSRegions, []string{
 			"ap-northeast-3",
 			"ap-southeast-3",
 			"ap-southeast-4",
@@ -765,7 +1151,7 @@ var awsServiceGroups = []ServiceGroup{
 			"cloudformation", "config", "organizations",
 			"ssm", "backup",
 		},
-		Regions: commercialRegions,
+		Regions: commercialAWSRegions,
 	},
 }
 
@@ -786,17 +1172,95 @@ func filterRegions(allRegions []string, excludeRegions []string) []string {
 }
 
 // getAvailableServicesForRegion returns a list of services available in the specified region
-func getAvailableServicesForRegion(region string) []string {
-	var availableServices []string
-
-	for _, group := range awsServiceGroups {
-		// If Regions is empty or contains the specified region
-		if len(group.Regions) == 0 || contains(group.Regions, region) {
-			availableServices = append(availableServices, group.Services...)
-		}
+func getAvailableAWSServices() []string {
+	return []string{
+		"accessanalyzer",
+		"acm",
+		"alb",
+		"api_gateway",
+		"appsync",
+		"auto_scaling",
+		"batch",
+		"budgets",
+		"cloud9",
+		"cloudformation",
+		"cloudfront",
+		"cloudhsm",
+		"cloudtrail",
+		"cloudwatch",
+		"codebuild",
+		"codecommit",
+		"codedeploy",
+		"codepipeline",
+		"cognito",
+		"config",
+		"customer_gateway",
+		"datapipeline",
+		"devicefarm",
+		"docdb",
+		"dynamodb",
+		"ebs",
+		"ec2_instance",
+		"ecr",
+		"ecrpublic",
+		"ecs",
+		"efs",
+		"eip",
+		"eks",
+		"elastic_beanstalk",
+		"elasticache",
+		"elb",
+		"emr",
+		"eni",
+		"es",
+		"firehose",
+		"glue",
+		"iam",
+		"identitystore",
+		"igw",
+		"iot",
+		"kinesis",
+		"kms",
+		"lambda",
+		"logs",
+		"media_package",
+		"media_store",
+		"medialive",
+		"msk",
+		"nacl",
+		"nat",
+		"opsworks",
+		"organization",
+		"qldb",
+		"rds",
+		"redshift",
+		"resourcegroups",
+		"route53",
+		"route_table",
+		"s3",
+		"secretsmanager",
+		"securityhub",
+		"servicecatalog",
+		"ses",
+		"sfn",
+		"sg",
+		"sns",
+		"sqs",
+		"ssm",
+		"subnet",
+		"swf",
+		"transit_gateway",
+		"vpc",
+		"vpc_peering",
+		"vpn_connection",
+		"vpn_gateway",
+		"waf",
+		"waf_regional",
+		"wafv2_cloudfront",
+		"wafv2_regional",
+		"workspaces",
+		"xray",
 	}
-
-	return uniqueStrings(availableServices)
 }
 
 // contains checks if a string slice contains a specific string
@@ -820,4 +1284,139 @@ func uniqueStrings(slice []string) []string {
 		}
 	}
 	return list
+}
+
+// GCP Regions as of April 2024
+var gcpCommercialRegions = []string{
+	"africa-south1",
+	"asia-east1",
+	"asia-east2",
+	"asia-northeast1",
+	"asia-northeast2",
+	"asia-northeast3",
+	"asia-south1",
+	"asia-south2",
+	"asia-southeast1",
+	"asia-southeast2",
+	"australia-southeast1",
+	"australia-southeast2",
+	"europe-central2",
+	"europe-north1",
+	"europe-southwest1",
+	"europe-west1",
+	"europe-west10",
+	"europe-west12",
+	"europe-west2",
+	"europe-west3",
+	"europe-west4",
+	"europe-west6",
+	"europe-west8",
+	"europe-west9",
+	"me-central1",
+	"me-central2",
+	"me-west1",
+	"northamerica-northeast1",
+	"northamerica-northeast2",
+	// "northamerica-south1",
+	"southamerica-east1",
+	"southamerica-west1",
+	"us-central1",
+	"us-east1",
+	"us-east4",
+	"us-east5",
+	"us-south1",
+	"us-west1",
+	"us-west2",
+	"us-west3",
+	"us-west4",
+}
+
+// Define service groups based on availability and characteristics for 2024
+var gcpServiceGroups = []ServiceGroup{
+	{
+		Name: "Core Infrastructure",
+		Services: []string{
+			"compute",
+			"disk",
+			"firewall",
+			"network",
+			"route",
+			"router",
+			"subnetwork",
+			"vpn_gateway",
+		},
+		Regions: []string{}, // available in all regions
+	},
+	{
+		Name: "Containers and Serverless",
+		Services: []string{
+			"cloud_run",
+			"gke",
+			"cloudFunctions",
+		},
+		Regions: gcpCommercialRegions,
+	},
+	{
+		Name: "Storage and Database",
+		Services: []string{
+			"sql",
+			"filestore",
+			"memorystore",
+			"spanner",
+		},
+		Regions: filterRegions(gcpCommercialRegions, []string{
+			"asia-northeast2",
+			"asia-south2",
+			"europe-southwest1",
+			"northamerica-northeast2",
+		}),
+	},
+	{
+		Name: "Network Services",
+		Services: []string{
+			"forwarding_rule",
+			"target_pool",
+			"backend_service",
+			"url_map",
+			"target_http_proxy",
+			"target_https_proxy",
+		},
+		Regions: gcpCommercialRegions,
+	},
+	{
+		Name: "Security and Identity",
+		Services: []string{
+			"kms",
+			"secret_manager",
+			"security_policy",
+		},
+		Regions: filterRegions(gcpCommercialRegions, []string{
+			"asia-northeast2",
+			"europe-southwest1",
+			"southamerica-west1",
+		}),
+	},
+	{
+		Name: "Management Services",
+		Services: []string{
+			"monitoring",
+			"logging",
+			"cloud_scheduler",
+		},
+		Regions: gcpCommercialRegions,
+	},
+}
+
+// getAvailableGCPServicesForRegion returns a list of services available in the specified region
+func getAvailableGCPServicesForRegion(region string) []string {
+	var availableServices []string
+
+	for _, group := range gcpServiceGroups {
+		// If Regions is empty or contains the specified region
+		if len(group.Regions) == 0 || contains(group.Regions, region) {
+			availableServices = append(availableServices, group.Services...)
+		}
+	}
+
+	return uniqueStrings(availableServices)
 }
