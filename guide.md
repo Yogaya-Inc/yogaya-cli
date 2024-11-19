@@ -3,7 +3,10 @@
 Follow the steps below to execute commands using the Yogaya CLI. These instructions abstract individual path settings to ensure clarity and flexibility.
 
 ## Installation
-
+```bash
+brew tap Yogaya-Inc/yogaya
+brew install yogaya
+```
 
 ## Yogaya Commands
 
