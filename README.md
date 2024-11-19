@@ -1,5 +1,3 @@
-# .gitignoreは絶賛整備中のため実行ファイルや実行結果ファイルをコミットしないこと
-
 # yogaya-cli
 
 > ⚠️ WARNING: .gitignore is currently under development. Do not commit executable files or execution result files.
