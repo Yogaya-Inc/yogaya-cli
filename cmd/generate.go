@@ -145,27 +145,27 @@ func ensureGlobalPluginDirectory() (func() error, error) {
 
 // runTerraformerAWS executes Terraformer for AWS to generate resources for each region
 func runTerraformerAWS(account CloudAccount) error {
-	log.Printf("Starting AWS Terraformer process for account: %s", account.ID)
+	log.Printf("Starting process for account: %s", account.ID)
 
 	// Get current working directory (project root)
-	projectDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("error getting current working directory: %v", err)
-	}
+	// projectDir, err := os.Getwd()
+	// if err != nil {
+	// 	return fmt.Errorf("error getting current working directory: %v", err)
+	// }
 
 	// Define terraformer binary path relative to project root
-	terraformerPath := filepath.Join(projectDir, "bin", "terraformer")
+	// terraformerPath := filepath.Join(projectDir, "bin", "terraformer")
 	// log.Printf("Using Terraformer binary at: %s", terraformerPath)
 
 	// Check if terraformer binary exists
-	if _, err := os.Stat(terraformerPath); err != nil {
-		return fmt.Errorf("❌ terraformer binary not found at %s: %v", terraformerPath, err)
-	}
+	// if _, err := os.Stat(terraformerPath); err != nil {
+	// 	return fmt.Errorf("❌ terraformer binary not found at %s: %v", terraformerPath, err)
+	// }
 
 	// Make sure the binary is executable
-	if err := os.Chmod(terraformerPath, 0755); err != nil {
-		return fmt.Errorf("❌ failed to make terraformer binary executable: %v", err)
-	}
+	// if err := os.Chmod(terraformerPath, 0755); err != nil {
+	// 	return fmt.Errorf("❌ failed to make terraformer binary executable: %v", err)
+	// }
 	// log.Println("✅ Terraformer binary verified and executable")
 
 	// Process AWS credentials
@@ -194,12 +194,14 @@ func runTerraformerAWS(account CloudAccount) error {
 		return fmt.Errorf("error creating base output directory: %v", err)
 	}
 
+	outputCompletedServiceCount := 0
+
 	// Get AWS regions
 	regions := getAWSRegions()
 	// log.Printf("Processing %d AWS regions: %v\n", len(regions), regions)
 
 	// Define maximum number of concurrent workers
-	maxConcurrency := 5 // Max Threads
+	maxConcurrency := 7 // Max Threads
 	sem := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex // To protect shared resources like log output
@@ -214,6 +216,8 @@ func runTerraformerAWS(account CloudAccount) error {
 			sem <- struct{}{}
 			defer func() { <-sem }() // Release the slot when done
 
+			log.Printf("Processing %v region...\n", region)
+
 			regionDir := filepath.Join(baseOutputDir, region)
 			if err := os.MkdirAll(regionDir, 0755); err != nil {
 				mu.Lock()
@@ -227,7 +231,7 @@ func runTerraformerAWS(account CloudAccount) error {
 				return
 			}
 
-			log.Printf("Running terraform init in %s", regionDir)
+			// log.Printf("Running terraform init in %s", regionDir)
 			terraformInitCmd := exec.Command("terraform", "init")
 			terraformInitCmd.Dir = regionDir
 			initOutput, err := terraformInitCmd.CombinedOutput()
@@ -245,7 +249,7 @@ func runTerraformerAWS(account CloudAccount) error {
 			// 	log.Printf("⚠️ No services configured for region %s, skipping", region)
 			// 	return
 			// }
-			terraformerImportCmd := exec.Command(terraformerPath, "import", "aws",
+			terraformerImportCmd := exec.Command("terraformer", "import", "aws",
 				"--resources="+strings.Join(resources, ","),
 				"--regions="+region,
 				"--path-output=./")
@@ -289,11 +293,14 @@ func runTerraformerAWS(account CloudAccount) error {
 
 			mergeFilesOfRefion(baseOutputDir, "aws")
 
+			removedWorkDir(filepath.Join(baseOutputDir, "all_resources_in_aws-"+account.ID+".tf"), regionDir, "aws")
+
 			os.RemoveAll(filepath.Join(regionDir, ".terraform"))
 			os.Remove(filepath.Join(regionDir, "main.tf"))
 			os.Remove(filepath.Join(regionDir, ".terraform.lock.hcl"))
 
-			log.Printf("✅ Successfully generated Terraform code for region %s", region)
+			outputCompletedServiceCount++
+			log.Printf("✅ Successfully generated Terraform code for region %s (%v/%v)", region, outputCompletedServiceCount, len(regions))
 		}(region, i)
 	}
 
@@ -313,27 +320,27 @@ func runTerraformerAWS(account CloudAccount) error {
 
 // runTerraformerGCP executes Terraformer for GCP to generate resources for each region
 func runTerraformerGCP(account CloudAccount) error {
-	log.Printf("Starting GCP Terraformer process for account: %s", account.ID)
+	log.Printf("Starting process for account: %s", account.ID)
 
 	// Get current working directory (project root)
-	projectDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("error getting current working directory: %v", err)
-	}
+	// projectDir, err := os.Getwd()
+	// if err != nil {
+	// 	return fmt.Errorf("error getting current working directory: %v", err)
+	// }
 
 	// Define terraformer binary path relative to project root
-	terraformerPath := filepath.Join(projectDir, "bin", "terraformer")
+	// terraformerPath := filepath.Join(projectDir, "bin", "terraformer")
 	// log.Printf("Using Terraformer binary at: %s", terraformerPath)
 
 	// Check if terraformer binary exists
-	if _, err := os.Stat(terraformerPath); err != nil {
-		return fmt.Errorf("❌ terraformer binary not found at %s: %v", terraformerPath, err)
-	}
+	// if _, err := os.Stat(terraformerPath); err != nil {
+	// 	return fmt.Errorf("❌ terraformer binary not found at %s: %v", terraformerPath, err)
+	// }
 
 	// Make sure the binary is executable
-	if err := os.Chmod(terraformerPath, 0755); err != nil {
-		return fmt.Errorf("❌ failed to make terraformer binary executable: %v", err)
-	}
+	// if err := os.Chmod(terraformerPath, 0755); err != nil {
+	// 	return fmt.Errorf("❌ failed to make terraformer binary executable: %v", err)
+	// }
 	// log.Println("✅ Terraformer binary verified and executable")
 
 	// Process GCP credentials
@@ -396,10 +403,10 @@ func runTerraformerGCP(account CloudAccount) error {
 	if err := os.WriteFile(tempFile.Name(), []byte(gcpCredsJSON), 0600); err != nil {
 		return fmt.Errorf("❌ error writing GCP credentials to temporary file: %v", err)
 	}
-	log.Printf("✅ Created temporary credentials file at: %s", tempFile.Name())
+	// log.Printf("✅ Created temporary credentials file at: %s", tempFile.Name())
 
 	// Initialize Terraform in base directory
-	log.Printf("Running terraform init in %s", baseOutputDir)
+	// log.Printf("Running terraform init in %s", baseOutputDir)
 	terraformInitCmd := exec.Command("terraform", "init")
 	terraformInitCmd.Dir = baseOutputDir
 	initOutput, err := terraformInitCmd.CombinedOutput()
@@ -474,6 +481,8 @@ func runTerraformerGCP(account CloudAccount) error {
 			sem <- struct{}{}
 			defer func() { <-sem }() // Release the slot when done
 
+			log.Printf("Processing %v region...\n", region)
+
 			regionDir := filepath.Join(baseOutputDir, region)
 			if err := os.MkdirAll(regionDir, 0755); err != nil {
 				mu.Lock()
@@ -482,7 +491,7 @@ func runTerraformerGCP(account CloudAccount) error {
 				return
 			}
 
-			terraformerImportCmd := exec.Command(terraformerPath, "import", "google",
+			terraformerImportCmd := exec.Command("terraformer", "import", "google",
 				"--resources="+strings.Join(resources, ","),
 				"--regions="+region,
 				"--projects="+gcpCloudCreds.ProjectID,
@@ -535,12 +544,6 @@ func runTerraformerGCP(account CloudAccount) error {
 			// }
 			removedWorkDir(filepath.Join(baseOutputDir, "all_resources_in_gcp-"+account.ID+".tf"), regionDir, "google")
 
-			os.RemoveAll(filepath.Join(baseOutputDir, ".terraform"))
-
-			os.Remove(filepath.Join(baseOutputDir, ".terraform.lock.hcl"))
-
-			os.Remove(filepath.Join(baseOutputDir, "main.tf"))
-
 			outputCompletedServiceCount++
 			log.Printf("✅ Successfully generated Terraform code for region %s (%v/%v)", region, outputCompletedServiceCount, len(regions))
 		}(region, i)
@@ -552,6 +555,12 @@ func runTerraformerGCP(account CloudAccount) error {
 	if len(errors) > 0 {
 		return fmt.Errorf("encountered errors during GCP Terraformer process: %v", errors)
 	}
+
+	os.RemoveAll(filepath.Join(baseOutputDir, ".terraform"))
+
+	os.Remove(filepath.Join(baseOutputDir, ".terraform.lock.hcl"))
+
+	os.Remove(filepath.Join(baseOutputDir, "main.tf"))
 
 	log.Printf("✅ Completed GCP Terraformer process for account: %s", account.ID)
 	return nil
