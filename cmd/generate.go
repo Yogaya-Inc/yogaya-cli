@@ -52,6 +52,11 @@ func generateCommand(cmd *cobra.Command, args []string) {
 	}
 	log.Printf("✅ Successfully loaded credentials for %d accounts", len(cm.config.Accounts))
 
+	homeDir, err := os.UserHomeDir()
+	pluginDir := filepath.Join(homeDir, ".terraform.d", "plugins", "darwin_arm64")
+	// Create directory with all parent directories if they don't exist
+	err = os.MkdirAll(pluginDir, 0755)
+
 	// Iterate over each cloud account and run Terraformer
 	for i, account := range cm.config.Accounts {
 		log.Printf("Processing account %d/%d: %s (%s)", i+1, len(cm.config.Accounts), account.ID, account.Provider)
