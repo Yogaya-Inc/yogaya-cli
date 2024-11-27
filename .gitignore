@@ -32,7 +32,8 @@ main
 yogaya
 
 # Generated init command directory
-.yogaya/
+.yogaya/*
+.yogaya/.git/
 
 # Generated generate command directory
 generated/

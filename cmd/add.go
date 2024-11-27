@@ -11,9 +11,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -56,6 +59,14 @@ type GCPCloudCredentials struct {
 	PrivateKey   string `json:"private_key" yaml:"private_key"`
 	ClientEmail  string `json:"client_email" yaml:"client_email"`
 	ClientID     string `json:"client_id" yaml:"client_id"`
+}
+
+// AzureCredentials represents Azure-specific credentials
+type AzureCredentials struct {
+	SubscriptionID string `json:"subscription_id"`
+	TenantID       string `json:"tenant_id"`
+	Name           string `json:"name"`
+	Environment    string `json:"environment"`
 }
 
 // CloudAccountsConfig represents the structure of cloud_accounts.conf
@@ -109,6 +120,8 @@ func (cm *CredentialManager) generateAccountID(account *CloudAccount) string {
 		hash.Write([]byte(account.Credentials.(*AWSCredentials).AccessKeyID + account.Credentials.(*AWSCredentials).Region))
 	case "gcp":
 		hash.Write([]byte(account.Credentials.(*GCPCloudCredentials).ProjectID + account.Credentials.(*GCPCloudCredentials).ClientEmail))
+	case "azure":
+		hash.Write([]byte(account.Credentials.(*AzureCredentials).SubscriptionID + account.Credentials.(*AzureCredentials).TenantID))
 	}
 	return hex.EncodeToString(hash.Sum(nil))[:12]
 }
@@ -154,16 +167,21 @@ func (cm *CredentialManager) AddCredentials(provider, credentialsPath string) er
 
 // readCredentialsFile reads and parses the credentials file
 func (cm *CredentialManager) readCredentialsFile(provider, path string) (interface{}, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
 	switch provider {
 	case "aws":
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
 		return parseAWSCredentials(data)
 	case "gcp":
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
 		return parseGCPCredentials(data)
+	case "azure":
+		return getAzureCredentialsFromCLI()
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -223,6 +241,33 @@ func parseGCPCredentials(data []byte) (interface{}, error) {
 	return creds, nil
 }
 
+// getAzureCredentialsFromCLI retrieves Azure credentials from Azure CLI
+func getAzureCredentialsFromCLI() (*AzureCredentials, error) {
+	accountCmd := exec.Command("az", "account", "show")
+	output, err := accountCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Azure account info. Please ensure you're logged in with 'az login': %v", err)
+	}
+
+	var accountInfo struct {
+		ID          string `json:"id"`
+		TenantID    string `json:"tenantId"`
+		Name        string `json:"name"`
+		Environment string `json:"environmentName"`
+	}
+
+	if err := json.Unmarshal(output, &accountInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse Azure CLI output: %v", err)
+	}
+
+	return &AzureCredentials{
+		SubscriptionID: accountInfo.ID,
+		TenantID:       accountInfo.TenantID,
+		Name:           accountInfo.Name,
+		Environment:    accountInfo.Environment,
+	}, nil
+}
+
 // validateCredentials checks if the credentials have read-only permissions
 func (cm *CredentialManager) validateCredentials(provider string, creds interface{}) error {
 	switch provider {
@@ -238,6 +283,12 @@ func (cm *CredentialManager) validateCredentials(provider string, creds interfac
 			return fmt.Errorf("invalid GCP credentials type")
 		}
 		return cm.validateGcpCredentials(*gcpCreds)
+	case "azure":
+		azureCreds, ok := creds.(*AzureCredentials)
+		if !ok {
+			return fmt.Errorf("invalid Azure credentials type")
+		}
+		return cm.validateAzureCredentials(*azureCreds)
 	default:
 		return fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -297,6 +348,27 @@ func (cm *CredentialManager) validateGcpCredentials(creds GCPCloudCredentials) e
 
 	_, err = credentials.TokenSource.Token()
 	return err
+}
+
+// validateAzureCredentials validates Azure credentials without simulating policies
+func (cm *CredentialManager) validateAzureCredentials(creds AzureCredentials) error {
+	credential, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return fmt.Errorf("failed to create Azure credential: %v", err)
+	}
+
+	client, err := armresources.NewResourceGroupsClient(creds.SubscriptionID, credential, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create Azure resource groups client: %v", err)
+	}
+
+	pager := client.NewListPager(nil)
+	_, err = pager.NextPage(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to validate Azure credentials: %v", err)
+	}
+
+	return nil
 }
 
 // ListAccounts prints all configured accounts
