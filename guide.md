@@ -68,6 +68,7 @@ yogaya add <Cloud_Service_Name> <cloud_accounts.conf_Path> <Cloud_Service_Creden
   - `<Cloud_Service_Name>`: The name of the cloud service (e.g., `aws`, `gcp`).
   - `<cloud_accounts.conf_Path>`: Path to the `cloud_accounts.conf` file.
   - `<Cloud_Service_Credential_Path>`: Path to the cloud service's credential file.
+    - **However, in the case of Azure, specify “any”.**
 
 **Examples:**
 
@@ -81,6 +82,12 @@ yogaya add <Cloud_Service_Name> <cloud_accounts.conf_Path> <Cloud_Service_Creden
 
   ```bash
   yogaya add aws ./yogaya/.yogaya/cloud_accounts.conf /path/to/aws/credentials
+  ```
+
+  - **Adding an Azure Account:**
+
+  ```bash
+  yogaya add azure ./yogaya/.yogaya/cloud_accounts.conf any
   ```
 
 **What It Does:**
@@ -131,6 +138,12 @@ yogaya generate ./yogaya/.yogaya/cloud_accounts.conf
 
      ```bash
      yogaya add aws /path/to/configuration/.yogaya/cloud_accounts.conf /path/to/aws/credentials
+     ```
+
+   - **Azure:**
+
+     ```bash
+     yogaya add azure /path/to/configuration/.yogaya/cloud_accounts.conf any
      ```
 
 3. **Generate Resources:**

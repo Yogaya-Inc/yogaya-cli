@@ -6,10 +6,11 @@ Before installing and using the Yogaya CLI, ensure the following tools are pre-i
 
 - **Go** 1.23.3 darwin/arm64 or later
 - **Git**: 2.39.3 (Apple Git-146)
-- **Terraform**: 1.9.8　(latest as of 11/19/2024)
-- **Terraformer**: 0.8.24　(latest as of 11/19/2024)
-- **AWS CLI**: 2.19.1 Python/3.12.7 Darwin/23.6.0 source/arm64(latest as of 11/19/2024)
-- **Google Cloud SDK**: 501.0.0　(latest as of 11/19/2024)
+- **Terraform**: 1.9.8　(latest as of 11/26/2024)
+- **Terraformer**: 0.8.24　(latest as of 11/26/2024)
+- **AWS CLI**: 2.19.1 Python/3.12.7 Darwin/23.6.0 source/arm64(latest as of 11/26/2024)
+- **Google Cloud SDK**: 501.0.0　(latest as of 11/26/2024)
+- **Azure CLI**: 2.67.0　(latest as of 11/26/2024)
 
 ## Installation
 
@@ -153,6 +154,31 @@ If you are using GCP, follow these steps:
      ```
 
 Ensure all the APIs required for your project are enabled successfully.
+
+## Azure Setup
+
+If you are using Azure, follow these steps:
+
+1. **Install Azure CLI**
+   - Follow [this page](https://learn.microsoft.com/ja-jp/cli/azure/install-azure-cli-macos) to install Azure CLI.
+
+   - quick install
+
+     ```bash
+     brew install azure-cli
+     ```
+
+2. **Create an Reader User**
+   - Create a user and attach the `Readr` role.
+   - Please refer to the [How to create, invite, and delete users](https://learn.microsoft.com/en-us/entra/fundamentals/how-to-create-delete-users)</br>
+   and [Assign Azure roles using the Azure portal](https://learn.microsoft.com/en-us/azure/role-based-access-control/role-assignments-portal) to proceed..
+
+3. **Configure Azure CLI**
+   - Log in to Azure CLI as a user with only Reader permission created in Azure CLI.
+
+     ```bash
+     az login
+     ```
 
 ## Next Step (Getting Started with Yogaya CLI)
 
