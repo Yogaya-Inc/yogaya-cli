@@ -33,7 +33,14 @@ Before installing and using the Yogaya CLI, ensure the following tools are pre-i
 ## Installing Terraformer
 
   ```bash
-  brew install terraformer
+  brew install --HEAD --force terraformer
+  ```
+
+  If you have already installed Terraformer
+
+  ```bash
+  brew unlink terraformer
+  brew install --HEAD --force terraformer
   ```
 
 ## AWS Setup
