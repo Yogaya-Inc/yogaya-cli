@@ -99,7 +99,8 @@ func mergeFiles(regionDir, outputFileName string) error {
 	var providerContent strings.Builder
 	var outputContent strings.Builder
 	var resourceContent strings.Builder
-	var providerWritten, outputWritten bool // Flags to ensure single inclusion of provider and output sections
+	var providerWritten bool // Flags to ensure single inclusion of provider sections
+	// var outputWritten bool   // Flags to ensure single inclusion of output sections
 
 	// Walk through all `.tf` files in the directory and its subdirectories
 	err := filepath.Walk(regionDir, func(path string, info os.FileInfo, err error) error {
@@ -132,13 +133,13 @@ func mergeFiles(regionDir, outputFileName string) error {
 					providerContent.WriteString("\n") // Add spacing
 					providerWritten = true
 				}
-			case "output.tf":
-				// Add output.tf content if not already included
-				if !outputWritten {
-					outputContent.Write(content)
-					outputContent.WriteString("\n") // Add spacing
-					outputWritten = true
-				}
+			// case "output.tf":
+			// 	// Add output.tf content if not already included
+			// 	if !outputWritten {
+			// 		outputContent.Write(content)
+			// 		outputContent.WriteString("\n") // Add spacing
+			// 		outputWritten = true
+			// 	}
 			default:
 				// Add all other `.tf` files to resourceContent
 				resourceContent.WriteString(fmt.Sprintf("# Start of %s\n\n", filepath.Base(path)))
@@ -218,33 +219,32 @@ provider "aws" {
 	case "gcp":
 		mainTFContent = fmt.Sprintf(`
 terraform {
-	required_providers {
-		google-beta = {
-			source  = "hashicorp/google"
-			version = "4.0.0"
-		}
-	}
-	required_version = ">= 0.13"
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "6.8.0"
+    }
+  }
 }
 
-provider "google-beta" {
-	project = "%s"
+provider "google" {
+  project = "%s"
 }
 `, fileAttributes)
 	case "azure":
 		mainTFContent = fmt.Sprintf(`
 terraform {
-required_providers {
-	azurerm = {
-		source  = "hashicorp/azurerm"
-		version = "~> 3.0"
-	}
-}
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0.2"
+    }
+  }
+  required_version = ">= 0.13"
 }
 
 provider "azurerm" {
-features {}
-skip_provider_registration = true
+  features {}
 }
 `)
 	default:

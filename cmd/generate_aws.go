@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -47,6 +46,7 @@ func runTerraformerAWS(account CloudAccount) error {
 
 	// Get AWS regions
 	regions := getAWSRegions()
+	// regions = []string{"ap-northeast-1"} // for debug
 	// log.Printf("Processing %d AWS regions: %v\n", len(regions), regions)
 
 	// Define maximum number of concurrent workers
@@ -94,14 +94,16 @@ func runTerraformerAWS(account CloudAccount) error {
 			// log.Printf("✅ Terraform initialization successful")
 
 			resources := getAvailableAWSServices()
-			// if len(services) == 0 {
-			// 	log.Printf("⚠️ No services configured for region %s, skipping", region)
-			// 	return
-			// }
+			if len(resources) == 0 {
+				log.Printf("⚠️ No services configured for region %s, skipping", region)
+				return
+			}
 			terraformerImportCmd := exec.Command("terraformer", "import", "aws",
-				"--resources="+strings.Join(resources, ","),
+				// "--resources="+strings.Join(resources, ","),
+				"--resources=*",
 				"--regions="+region,
-				"--path-output=./")
+				"--path-output=./",
+				"--compact")
 			terraformerImportCmd.Dir = regionDir
 			terraformerImportCmd.Env = append(os.Environ(),
 				"AWS_ACCESS_KEY_ID="+accessKeyID,
@@ -115,32 +117,7 @@ func runTerraformerAWS(account CloudAccount) error {
 				return
 			}
 
-			// for _, service := range services {
-			// terraformerImportCmd := exec.Command(terraformerPath, "import", "aws",
-			// 	"--resources="+service,
-			// 	"--regions="+region,
-			// 	"--path-output=./")
-			// terraformerImportCmd.Dir = regionDir
-			// terraformerImportCmd.Env = append(os.Environ(),
-			// 	"AWS_ACCESS_KEY_ID="+accessKeyID,
-			// 	"AWS_SECRET_ACCESS_KEY="+secretAccessKey)
-
-			// importOutput, err := terraformerImportCmd.CombinedOutput()
-			// if err != nil {
-			// 	mu.Lock()
-			// 	errors = append(errors, fmt.Errorf("error running Terraformer for region %s: %v\nOutput: %s", region, err, string(importOutput)))
-			// 	mu.Unlock()
-			// 	return
-			// }
-			// If there seems to be a problem with Terraformer itself, enable it.
-			// log.Printf("Terraformer import output:\n%s", string(importOutput))
-			// }
-
-			// if err := mergeFilesOfRefion(baseOutputDir, "aws"); err != nil {
-			// 	fmt.Printf("Internal error: %v\n", err)
-			// }
-
-			mergeFilesOfRefion(baseOutputDir, "aws")
+			mergeFilesOfRefion(regionDir, "aws")
 
 			removedWorkDir(filepath.Join(baseOutputDir, "all_resources_in_aws-"+account.ID+".tf"), regionDir, "aws")
 
