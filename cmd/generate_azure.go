@@ -38,16 +38,17 @@ func runTerraformerAzure(account CloudAccount) error {
 
 	// Create base output directory
 	baseOutputDir := fmt.Sprintf("generated/azure-%s", account.ID)
+	RenameDirWithBackup(baseOutputDir)
 	if err := os.MkdirAll(baseOutputDir, 0755); err != nil {
 		return fmt.Errorf("error creating base output directory: %v", err)
 	}
 
-	if err := createMainTF("azure", baseOutputDir, ""); err != nil {
+	if err := createMainTF("azure", baseOutputDir, []string{""}); err != nil {
 		return fmt.Errorf("error writing global main.tf: %v", err)
 	}
 
 	// Initialize Terraform
-	terraformInitCmd := exec.Command("terraform", "init")
+	terraformInitCmd := exec.Command("terraform", "init", "--upgrade")
 	terraformInitCmd.Dir = baseOutputDir
 	initOutput, err := terraformInitCmd.CombinedOutput()
 	if err != nil {
@@ -62,7 +63,7 @@ func runTerraformerAzure(account CloudAccount) error {
 	// Run Terraformer for all resources without specifying resource group
 	terraformerImportCmd := exec.Command("terraformer", "import", "azure",
 		"--resources="+strings.Join(resources, ","),
-		"--path-pattern={output}/{provider}",
+		// "--path-pattern={output}/{provider}",
 		"--path-output=./",
 		"--compact")
 	terraformerImportCmd.Dir = baseOutputDir
@@ -97,6 +98,7 @@ func mergeAzureFiles(azureDir, outputFile string) error {
 	var resourceContent strings.Builder
 	var variableContent strings.Builder
 	var outputContent strings.Builder
+	var providerWritten bool // Flags to ensure single inclusion of provider sections
 
 	// Walk through all directories and files
 	err := filepath.Walk(azureDir, func(path string, info os.FileInfo, err error) error {
@@ -104,13 +106,8 @@ func mergeAzureFiles(azureDir, outputFile string) error {
 			return err
 		}
 
-		// Skip directories
-		if info.IsDir() {
-			return nil
-		}
-
-		// Process only .tf files
-		if !strings.HasSuffix(info.Name(), ".tf") {
+		// Skip directories and non-.tf files
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".tf") {
 			return nil
 		}
 
@@ -120,34 +117,37 @@ func mergeAzureFiles(azureDir, outputFile string) error {
 			return fmt.Errorf("error reading file %s: %v", path, err)
 		}
 
-		// Determine file type and append content accordingly
-		relPath, err := filepath.Rel(azureDir, path)
-		if err != nil {
-			return err
+		if len(string(content)) == 0 || string(content) == "\n" {
+			return nil
 		}
 
-		serviceName := strings.Split(relPath, string(os.PathSeparator))[0]
 		fileName := filepath.Base(path)
-
-		if fileName == "provider.tf" {
-			// Only include provider block once
-			if providerContent.Len() == 0 {
+		switch fileName {
+		case "provider.tf":
+			if !providerWritten {
 				providerContent.WriteString("# Provider Configuration\n\n")
 				providerContent.Write(content)
 				providerContent.WriteString("\n")
+				providerWritten = true
 			}
-		} else if fileName == "variables.tf" {
-			variableContent.WriteString(fmt.Sprintf("# Variables for %s\n\n", serviceName))
+		case "variables.tf":
+			variableContent.WriteString("# Variable Definitions\n\n")
 			variableContent.Write(content)
 			variableContent.WriteString("\n")
-		} else if fileName == "outputs.tf" {
-			outputContent.WriteString(fmt.Sprintf("# Outputs for %s\n\n", serviceName))
+		case "outputs.tf":
+			outputContent.WriteString("# Output Definitions\n\n")
 			outputContent.Write(content)
 			outputContent.WriteString("\n")
-		} else if strings.HasSuffix(fileName, ".tf") && fileName != "terraform.tfstate" {
-			resourceContent.WriteString(fmt.Sprintf("# Resources for %s\n\n", serviceName))
+		case "resources.tf":
+			resourceContent.WriteString("# Resource Definitions\n\n")
 			resourceContent.Write(content)
 			resourceContent.WriteString("\n")
+		default:
+			if fileName != "terraform.tfstate" {
+				resourceContent.WriteString(fmt.Sprintf("# Additional Resources from %s\n\n", path))
+				resourceContent.Write(content)
+				resourceContent.WriteString("\n")
+			}
 		}
 
 		return nil

@@ -4,12 +4,17 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go/aws"
 )
 
 // runTerraformerAWS executes Terraformer for AWS to generate resources for each region
@@ -38,15 +43,14 @@ func runTerraformerAWS(account CloudAccount) error {
 
 	// Create base output directory
 	baseOutputDir := fmt.Sprintf("generated/aws-%s", account.ID)
+	RenameDirWithBackup(baseOutputDir)
 	if err := os.MkdirAll(baseOutputDir, 0755); err != nil {
 		return fmt.Errorf("error creating base output directory: %v", err)
 	}
 
-	outputCompletedServiceCount := 0
-
 	// Get AWS regions
 	regions := getAWSRegions()
-	// regions = []string{"ap-northeast-1"} // for debug
+	// regions := []string{"ap-northeast-1"} // for debug
 	// log.Printf("Processing %d AWS regions: %v\n", len(regions), regions)
 
 	// Define maximum number of concurrent workers
@@ -55,6 +59,8 @@ func runTerraformerAWS(account CloudAccount) error {
 	var wg sync.WaitGroup
 	var mu sync.Mutex // To protect shared resources like log output
 	errors := []error{}
+
+	outputCompletedServiceCount := 0
 
 	for i, region := range regions {
 		wg.Add(1)
@@ -75,13 +81,13 @@ func runTerraformerAWS(account CloudAccount) error {
 				return
 			}
 
-			if err := createMainTF("aws", regionDir, region); err != nil {
+			if err := createMainTF("aws", regionDir, []string{region}); err != nil {
 				fmt.Printf("error writing global main.tf: %v", err)
 				return
 			}
 
 			// log.Printf("Running terraform init in %s", regionDir)
-			terraformInitCmd := exec.Command("terraform", "init")
+			terraformInitCmd := exec.Command("terraform", "init", "--upgrade")
 			terraformInitCmd.Dir = regionDir
 			initOutput, err := terraformInitCmd.CombinedOutput()
 			if err != nil {
@@ -93,13 +99,7 @@ func runTerraformerAWS(account CloudAccount) error {
 			// log.Printf("Terraform init output:\n%s", string(initOutput))
 			// log.Printf("✅ Terraform initialization successful")
 
-			resources := getAvailableAWSServices()
-			if len(resources) == 0 {
-				log.Printf("⚠️ No services configured for region %s, skipping", region)
-				return
-			}
 			terraformerImportCmd := exec.Command("terraformer", "import", "aws",
-				// "--resources="+strings.Join(resources, ","),
 				"--resources=*",
 				"--regions="+region,
 				"--path-output=./",
@@ -116,6 +116,7 @@ func runTerraformerAWS(account CloudAccount) error {
 				mu.Unlock()
 				return
 			}
+			// fmt.Printf("importOutput\n%v", string(importOutput))
 
 			mergeFilesOfRefion(regionDir, "aws")
 
@@ -138,138 +139,70 @@ func runTerraformerAWS(account CloudAccount) error {
 	}
 
 	os.Remove("generated/all_resources_in_generated.tf")
-	os.Remove("./all_resources_in_..tf")
 
 	log.Printf("✅ Completed AWS Terraformer process for account: %s", account.ID)
 	return nil
 }
 
-// getAWSRegions is a wrapper function that tries different methods to get regions
 func getAWSRegions() []string {
+
+	regions := []string{}
+
+	// Load AWS configuration
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		return getAWSRegionsHardCoded()
+	}
+
+	// Create EC2 client
+	client := ec2.NewFromConfig(cfg)
+
+	// Describe regions
+	resp, err := client.DescribeRegions(context.TODO(), &ec2.DescribeRegionsInput{
+		AllRegions: aws.Bool(true),
+	})
+
+	if err != nil {
+		return getAWSRegionsHardCoded()
+	}
+
+	for _, region := range resp.Regions {
+		regions = append(regions, *region.RegionName)
+	}
+	return regions
+}
+
+func getAWSRegionsHardCoded() []string {
 	return []string{
-		"us-east-1",
-		"us-east-2",
+		"ap-south-2",
+		"ap-south-1",
+		"eu-south-1",
+		"eu-south-2",
+		"me-central-1",
+		"il-central-1",
+		"ca-central-1",
+		"eu-central-1",
+		"eu-central-2",
 		"us-west-1",
 		"us-west-2",
 		"af-south-1",
-		"ap-east-1",
-		"ap-south-2",
-		"ap-southeast-3",
-		"ap-southeast-5",
-		"ap-southeast-4",
-		"ap-south-1",
+		"eu-north-1",
+		"eu-west-3",
+		"eu-west-2",
+		"eu-west-1",
 		"ap-northeast-3",
 		"ap-northeast-2",
+		"me-south-1",
+		"ap-northeast-1",
+		"sa-east-1",
+		"ap-east-1",
+		"ca-west-1",
 		"ap-southeast-1",
 		"ap-southeast-2",
-		"ap-northeast-1",
-		"ca-central-1",
-		"ca-west-1",
-		"cn-north-1",
-		"cn-northwest-1",
-		"eu-central-1",
-		"eu-west-1",
-		"eu-west-2",
-		"eu-south-1",
-		"eu-west-3",
-		"eu-south-2",
-		"eu-north-1",
-		"eu-central-2",
-		"il-central-1",
-		"me-south-1",
-		"me-central-1",
-		"sa-east-1",
-	}
-}
-
-// getAvailableServicesForRegion returns a list of services available in the specified region
-func getAvailableAWSServices() []string {
-	return []string{
-		"accessanalyzer",
-		"acm",
-		"alb",
-		"api_gateway",
-		"appsync",
-		"auto_scaling",
-		"batch",
-		"budgets",
-		"cloud9",
-		"cloudformation",
-		"cloudfront",
-		"cloudhsm",
-		"cloudtrail",
-		"cloudwatch",
-		"codebuild",
-		"codecommit",
-		"codedeploy",
-		"codepipeline",
-		"cognito",
-		"config",
-		"customer_gateway",
-		"datapipeline",
-		"devicefarm",
-		"docdb",
-		"dynamodb",
-		"ebs",
-		"ec2_instance",
-		"ecr",
-		"ecrpublic",
-		"ecs",
-		"efs",
-		"eip",
-		"eks",
-		"elastic_beanstalk",
-		"elasticache",
-		"elb",
-		"emr",
-		"eni",
-		"es",
-		"firehose",
-		"glue",
-		"iam",
-		"identitystore",
-		"igw",
-		"iot",
-		"kinesis",
-		"kms",
-		"lambda",
-		"logs",
-		"media_package",
-		"media_store",
-		"medialive",
-		"msk",
-		"nacl",
-		"nat",
-		"opsworks",
-		"organization",
-		"qldb",
-		"rds",
-		"redshift",
-		"resourcegroups",
-		"route53",
-		"route_table",
-		"s3",
-		"secretsmanager",
-		"securityhub",
-		"servicecatalog",
-		"ses",
-		"sfn",
-		"sg",
-		"sns",
-		"sqs",
-		"ssm",
-		"subnet",
-		"swf",
-		"transit_gateway",
-		"vpc",
-		"vpc_peering",
-		"vpn_connection",
-		"vpn_gateway",
-		"waf",
-		"waf_regional",
-		"wafv2_cloudfront",
-		"wafv2_regional",
-		"workspaces",
-		"xray",
+		"ap-southeast-3",
+		"ap-southeast-4",
+		"us-east-1",
+		"ap-southeast-5",
+		"us-east-2",
 	}
 }

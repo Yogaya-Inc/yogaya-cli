@@ -48,25 +48,33 @@ func generateCommand(cmd *cobra.Command, args []string) {
 	// Create directory with all parent directories if they don't exist
 	err = os.MkdirAll(pluginDir, 0755)
 
+	errFlag := false
+
 	// Iterate over each cloud account and run Terraformer
 	for i, account := range cm.config.Accounts {
+		if i > 0 {
+			log.Println("------------------------------------------------------------")
+		}
 		log.Printf("Processing account %d/%d: %s (%s)", i+1, len(cm.config.Accounts), account.ID, account.Provider)
 
 		switch account.Provider {
 		case "aws":
 			if err := runTerraformerAWS(account); err != nil {
+				errFlag = true
 				log.Printf("❌ Error generating Terraform code for AWS account %s: %v", account.ID, err)
 			} else {
 				log.Printf("✅ Successfully generated Terraform code for AWS account %s", account.ID)
 			}
 		case "gcp":
 			if err := runTerraformerGCP(account); err != nil {
+				errFlag = true
 				log.Printf("❌ Error generating Terraform code for GCP account %s: %v", account.ID, err)
 			} else {
 				log.Printf("✅ Successfully generated Terraform code for GCP account %s", account.ID)
 			}
 		case "azure":
 			if err := runTerraformerAzure(account); err != nil {
+				errFlag = true
 				log.Printf("❌ Error generating Terraform code for Azure account %s: %v", account.ID, err)
 			} else {
 				log.Printf("✅ Successfully generated Terraform code for Azure account %s", account.ID)
@@ -75,7 +83,38 @@ func generateCommand(cmd *cobra.Command, args []string) {
 			log.Printf("⚠️ Skipping unsupported provider: %s", account.Provider)
 		}
 	}
-	log.Println("Generation process completed")
+	if !errFlag {
+		log.Println("Generation process completed")
+	}
+}
+
+// RenameDirWithBackup renames a directory by adding "_bk" suffix if it already exists
+func RenameDirWithBackup(dirPath string) error {
+	// Check if directory exists
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	// Generate new path name
+	backupPath := dirPath + "_bk"
+
+	// Add number suffix if backup directory already exists
+	counter := 1
+	for {
+		_, err := os.Stat(backupPath)
+		if os.IsNotExist(err) {
+			break
+		}
+		backupPath = fmt.Sprintf("%s_bk%d", dirPath, counter)
+		counter++
+	}
+
+	// Execute rename operation
+	if err := os.Rename(dirPath, backupPath); err != nil {
+		return fmt.Errorf("failed to rename %v directory: %v", dirPath, err)
+	}
+	log.Printf("✅ %v move to %v\n", dirPath, backupPath)
+	return nil
 }
 
 func removedWorkDir(workingFile, regionDir, provider string) error {
@@ -100,6 +139,7 @@ func mergeFiles(regionDir, outputFileName string) error {
 	var outputContent strings.Builder
 	var resourceContent strings.Builder
 	var providerWritten bool // Flags to ensure single inclusion of provider sections
+	var mainWritten bool     // Flags to ensure single inclusion of provider sections
 	// var outputWritten bool   // Flags to ensure single inclusion of output sections
 
 	// Walk through all `.tf` files in the directory and its subdirectories
@@ -125,6 +165,10 @@ func mergeFiles(regionDir, outputFileName string) error {
 				return fmt.Errorf("failed to read file %s: %w", path, err)
 			}
 
+			if len(string(content)) == 0 || string(content) == "\n" {
+				return nil
+			}
+
 			switch filepath.Base(path) {
 			case "provider.tf":
 				// Add provider.tf content if not already included
@@ -132,6 +176,12 @@ func mergeFiles(regionDir, outputFileName string) error {
 					providerContent.Write(content)
 					providerContent.WriteString("\n") // Add spacing
 					providerWritten = true
+				}
+			case "main.tf":
+				if !mainWritten {
+					mainWritten = true
+				} else {
+					return nil
 				}
 			// case "output.tf":
 			// 	// Add output.tf content if not already included
@@ -206,41 +256,48 @@ func mergeFilesOfRefion(baseDir, provider string) error {
 }
 
 // createMainTF creates the main.tf file for a cloud provider
-func createMainTF(provider, dir, fileAttributes string) error {
+func createMainTF(provider, dir string, fileAttributes []string) error {
 	var mainTFContent string
 
 	switch provider {
 	case "aws":
 		mainTFContent = fmt.Sprintf(`
+terraform {
+  required_providers {
+    aws = {}
+  }
+  required_version = ">= 0.13"
+}
+
 provider "aws" {
   region = "%s"
 }
-`, fileAttributes)
+`, fileAttributes[0])
 	case "gcp":
 		mainTFContent = fmt.Sprintf(`
 terraform {
   required_providers {
     google = {
-      source  = "hashicorp/google"
-      version = "6.8.0"
+      source = "hashicorp/google"
     }
   }
+  required_version = ">= 0.13"
 }
 
 provider "google" {
   project = "%s"
+  region = "%s"
 }
-`, fileAttributes)
+`, fileAttributes[0], fileAttributes[1])
 	case "azure":
 		mainTFContent = fmt.Sprintf(`
 terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.0.2"
+      version = ">= 3.0.0, < 4.0.0"
     }
   }
-  required_version = ">= 0.13"
 }
 
 provider "azurerm" {
