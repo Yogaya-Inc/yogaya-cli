@@ -104,14 +104,27 @@ If you are using GCP, follow these steps:
 3. **Create a Service Account and Obtain Keys**
    - Follow the steps in the [Creating and Managing Service Account Keys](https://cloud.google.com/iam/docs/creating-managing-service-account-keys?hl=en) guide to create a service account and download its key.
 
-4. **Grant Permissions to the Service Account**
+4. **Create a Custom Role**
+   - Navigate to the "Roles" screen and click "CREATE ROLE" to proceed to the role creation screen.
+   - On the role creation screen, create a custom role with the following details:
+     - Example:
+       - Title: Storage Bucket Policy Viewer
+       - Description: Default (enter as appropriate)
+       - ID: Default (leave as is unless specific management requirements dictate otherwise)
+       - Role launch stage: Default (leave as is unless specific management requirements dictate otherwise)
+       - ADD PERMISSIONS: Add `storage.buckets.getIamPolicy` (search using the filter)
+   - After completing the input, click the "CREATE" button.
+
+5. **Grant Permissions to the Service Account**
    - In the IAM console, assign the following roles to the service account:
+     - Browser
      - Cloud Functions Viewer
      - Compute Viewer
      - Service Account Token Creator
      - Viewer
+     - Storage Bucket Policy Viewer (Created Custom Role)
 
-5. **Enable APIs for Your Project**
+6. **Enable APIs for Your Project**
    - Identify your project ID:
 
      ```bash
