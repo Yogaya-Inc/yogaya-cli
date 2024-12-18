@@ -33,7 +33,6 @@ yogaya
 
 # Generated init command directory
 .yogaya/*
-.yogaya/.git/
 
 # Generated generate command directory
 generated/
