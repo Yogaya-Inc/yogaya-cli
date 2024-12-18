@@ -32,11 +32,8 @@ func generateCommand(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	credFilePath := args[0]
-	log.Printf("Starting Terraform code generation using credentials from: %s", credFilePath)
-
 	// Load the credentials file
-	cm, err := NewCredentialManager(credFilePath)
+	cm, err := NewCredentialManager()
 	if err != nil {
 		log.Fatalf("❌ Error initializing credential manager: %v", err)
 		return

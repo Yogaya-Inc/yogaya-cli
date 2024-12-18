@@ -81,9 +81,9 @@ type CredentialManager struct {
 }
 
 // NewCredentialManager creates a new credential manager instance
-func NewCredentialManager(configPath string) (*CredentialManager, error) {
+func NewCredentialManager() (*CredentialManager, error) {
 	cm := &CredentialManager{
-		configPath: configPath,
+		configPath: "./.yogaya/cloud_accounts.conf",
 		config:     CloudAccountsConfig{Accounts: []CloudAccount{}},
 	}
 
@@ -385,14 +385,23 @@ func (cm *CredentialManager) ListAccounts() {
 
 // addCommand adds a cloud account with the credentials.
 func addCommand(cmd *cobra.Command, args []string) {
-	if len(args) != 3 {
-		fmt.Println("Usage: yogaya add <provider-name> <.yogaya/cloud_accounts.conf-file-path> <provider-credentials-file-path>")
-		return
+	// if len(args) != 2 {
+	// 	fmt.Println("Usage: yogaya add <provider-name> <provider-credentials-file-path>")
+	// 	return
+	// }
+
+	provider := args[0]
+	credentialsFile := ""
+
+	if provider != "azure" {
+		if len(args) != 2 {
+			fmt.Println("Usage: yogaya add <provider-name> <provider-credentials-file-path>")
+			return
+		}
+		credentialsFile = args[1]
 	}
 
-	provider, configPath, credentialsFile := args[0], args[1], args[2]
-
-	cm, err := NewCredentialManager(configPath)
+	cm, err := NewCredentialManager()
 	if err != nil {
 		fmt.Printf("Error initializing credential manager: %v\n", err)
 		return
