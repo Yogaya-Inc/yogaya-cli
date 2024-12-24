@@ -43,7 +43,6 @@ func runTerraformerAWS(account CloudAccount) error {
 
 	// Create base output directory
 	baseOutputDir := fmt.Sprintf("generated/aws-%s", account.ID)
-	RenameDirWithBackup(baseOutputDir)
 	if err := os.MkdirAll(baseOutputDir, 0755); err != nil {
 		return fmt.Errorf("error creating base output directory: %v", err)
 	}

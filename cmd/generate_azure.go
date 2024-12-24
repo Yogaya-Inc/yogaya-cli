@@ -38,7 +38,6 @@ func runTerraformerAzure(account CloudAccount) error {
 
 	// Create base output directory
 	baseOutputDir := fmt.Sprintf("generated/azure-%s", account.ID)
-	RenameDirWithBackup(baseOutputDir)
 	if err := os.MkdirAll(baseOutputDir, 0755); err != nil {
 		return fmt.Errorf("error creating base output directory: %v", err)
 	}
@@ -46,6 +45,14 @@ func runTerraformerAzure(account CloudAccount) error {
 	if err := createMainTF("azure", baseOutputDir, []string{""}); err != nil {
 		return fmt.Errorf("error writing global main.tf: %v", err)
 	}
+
+	yogayaProjectDir, err := os.Getwd()
+	if err != nil {
+		log.Fatal(err)
+	}
+	outputFileName := filepath.Join(yogayaProjectDir, baseOutputDir, fmt.Sprintf("all_resources_in_azure-%s.tf", strings.Replace(azureCreds["name"].(string), " ", "-", -1)))
+
+	os.Rename(outputFileName, outputFileName+"_bk")
 
 	// Initialize Terraform
 	terraformInitCmd := exec.Command("terraform", "init", "--upgrade")
@@ -55,6 +62,8 @@ func runTerraformerAzure(account CloudAccount) error {
 		log.Printf("Terraform init output:\n%s", string(initOutput))
 		return fmt.Errorf("error running terraform init: %v", err)
 	}
+
+	os.Rename(outputFileName+"_bk", outputFileName)
 
 	// Get all available Azure services
 	resources := getAvailableAzureServices()
@@ -77,7 +86,7 @@ func runTerraformerAzure(account CloudAccount) error {
 	}
 
 	// Merge all resource files into a single file
-	mergedFilePath := filepath.Join(baseOutputDir, fmt.Sprintf("all_resources_in_azure-%s.tf", azureCreds["name"].(string)))
+	mergedFilePath := filepath.Join(baseOutputDir, fmt.Sprintf("all_resources_in_azure-%s.tf", strings.Replace(azureCreds["name"].(string), " ", "-", -1)))
 	if err := mergeAzureFiles(filepath.Join(baseOutputDir, "azurerm"), mergedFilePath); err != nil {
 		return fmt.Errorf("error merging files: %v", err)
 	}

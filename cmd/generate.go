@@ -4,14 +4,42 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+type ChangeType string
+
+const (
+	Added    ChangeType = "A"
+	Modified ChangeType = "M"
+	Deleted  ChangeType = "D"
+)
+
+// ResourceAnalyzer handles the analysis of cloud resources
+type ResourceAnalyzer struct {
+	BaseDir   string
+	Changes   map[string]map[string]map[string]map[string]ChangeType // account -> provider -> region -> service -> change type
+	Providers map[string]*CloudProvider
+}
+
+type CloudProvider struct {
+	Name    string
+	Regions map[string]*Region
+}
+
+type Region struct {
+	Name     string
+	Services map[string]bool
+}
 
 // generateCmd represents the generate command
 var generateCmd = &cobra.Command{
@@ -54,64 +82,309 @@ func generateCommand(cmd *cobra.Command, args []string) {
 		}
 		log.Printf("Processing account %d/%d: %s (%s)", i+1, len(cm.config.Accounts), account.ID, account.Provider)
 
+		var err error
 		switch account.Provider {
 		case "aws":
-			if err := runTerraformerAWS(account); err != nil {
-				errFlag = true
-				log.Printf("❌ Error generating Terraform code for AWS account %s: %v", account.ID, err)
-			} else {
-				log.Printf("✅ Successfully generated Terraform code for AWS account %s", account.ID)
-			}
+			err = runTerraformerAWS(account)
 		case "gcp":
-			if err := runTerraformerGCP(account); err != nil {
-				errFlag = true
-				log.Printf("❌ Error generating Terraform code for GCP account %s: %v", account.ID, err)
-			} else {
-				log.Printf("✅ Successfully generated Terraform code for GCP account %s", account.ID)
-			}
+			err = runTerraformerGCP(account)
 		case "azure":
-			if err := runTerraformerAzure(account); err != nil {
-				errFlag = true
-				log.Printf("❌ Error generating Terraform code for Azure account %s: %v", account.ID, err)
-			} else {
-				log.Printf("✅ Successfully generated Terraform code for Azure account %s", account.ID)
-			}
+			err = runTerraformerAzure(account)
 		default:
 			log.Printf("⚠️ Skipping unsupported provider: %s", account.Provider)
+			continue
+		}
+
+		if err != nil {
+			errFlag = true
+			log.Printf("❌ Error generating Terraform code for %s account %s: %v",
+				account.Provider, account.ID, err)
+		} else {
+			log.Printf("✅ Successfully generated Terraform code for %s account %s",
+				account.Provider, account.ID)
 		}
 	}
+
+	log.Println("Analyzing resource changes...")
+
+	analyzer := &ResourceAnalyzer{
+		BaseDir: "generated",
+		Changes: make(map[string]map[string]map[string]map[string]ChangeType),
+	}
+
+	if err := analyzer.AnalyzeResourceChanges(); err != nil {
+		log.Printf("❌ Error analyzing resource changes: %v", err)
+		errFlag = false
+	}
+
 	if !errFlag {
 		log.Println("Generation process completed")
 	}
 }
 
-// RenameDirWithBackup renames a directory by adding "_bk" suffix if it already exists
-func RenameDirWithBackup(dirPath string) error {
-	// Check if directory exists
-	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+func (ra *ResourceAnalyzer) AnalyzeResourceChanges() error {
+	ra.Changes = make(map[string]map[string]map[string]map[string]ChangeType)
+
+	// Run git config command
+	gitConfigCmd := exec.Command("git", "config", "core.quotepath", "false")
+	_, err := gitConfigCmd.Output()
+	if err != nil {
+		return fmt.Errorf("error running git config: %v", err)
+	}
+
+	// Run git add command
+	gitAddCmd := exec.Command("git", "add", "./generated")
+	_, err = gitAddCmd.Output()
+	if err != nil {
+		return fmt.Errorf("error running git add: %v", err)
+	}
+
+	// Run git diff command
+	gitDiffcmd := exec.Command("git", "diff", "--cached", "--name-status")
+	gitDiffcmdOutput, err := gitDiffcmd.Output()
+	if err != nil {
+		return fmt.Errorf("error running git diff: %v", err)
+	}
+
+	// Process each changed file
+	scanner := bufio.NewScanner(strings.NewReader(string(gitDiffcmdOutput)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		changeType := parts[0]
+		filePath := parts[1]
+
+		if !strings.HasSuffix(filePath, ".tf") {
+			continue
+		}
+
+		// Extract account, provider, and region from path
+		pathParts := strings.Split(filePath, string(os.PathSeparator))
+		if len(pathParts) < 3 { // Need at least: generated/account
+			continue
+		}
+
+		// Parse path components
+		accountDir := pathParts[1]                        // e.g., aws-5079e9219e2e
+		providerName := strings.Split(accountDir, "-")[0] // aws-xxxx -> aws
+		// region := pathParts[2]
+		var region string
+		switch providerName {
+		case "azure":
+			region = "global"
+		case "aws", "gcp":
+			if len(pathParts) < 4 { // AWS/GCP needs: generated/account/provider/region
+				continue
+			}
+			region = pathParts[2]
+		default:
+			continue
+		}
+
+		// Initialize nested maps if needed
+		if _, exists := ra.Changes[accountDir]; !exists {
+			ra.Changes[accountDir] = make(map[string]map[string]map[string]ChangeType)
+		}
+		if _, exists := ra.Changes[accountDir][providerName]; !exists {
+			ra.Changes[accountDir][providerName] = make(map[string]map[string]ChangeType)
+		}
+		if _, exists := ra.Changes[accountDir][providerName][region]; !exists {
+			ra.Changes[accountDir][providerName][region] = make(map[string]ChangeType)
+		}
+
+		// Extract services from current and previous versions
+		currentServices := ra.extractServicesFromFile(filePath, changeType != "D")
+		var previousServices []string
+		if changeType != "A" {
+			prevCmd := exec.Command("git", "show", "HEAD:"+filePath)
+			prevOutput, err := prevCmd.Output()
+			if err == nil {
+				previousServices = ra.extractServicesFromContent(string(prevOutput))
+			}
+		}
+
+		// Process changes
+		ra.processServiceChanges(
+			ra.Changes[accountDir][providerName][region],
+			currentServices,
+			previousServices,
+			ChangeType(changeType),
+		)
+	}
+
+	ra.CommitChanges()
+	return nil
+}
+
+func (ra *ResourceAnalyzer) extractServicesFromFile(path string, exists bool) []string {
+	if !exists {
 		return nil
 	}
 
-	// Generate new path name
-	backupPath := dirPath + "_bk"
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
 
-	// Add number suffix if backup directory already exists
-	counter := 1
-	for {
-		_, err := os.Stat(backupPath)
-		if os.IsNotExist(err) {
-			break
+	return ra.extractServicesFromContent(string(content))
+}
+
+func (ra *ResourceAnalyzer) extractServicesFromContent(content string) []string {
+	services := make(map[string]bool)
+	scanner := bufio.NewScanner(strings.NewReader(content))
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(strings.TrimSpace(line), "resource") {
+			parts := strings.Split(line, "\"")
+			if len(parts) > 1 {
+				resourceType := parts[1]
+				serviceParts := strings.Split(resourceType, "_")
+				if len(serviceParts) > 1 {
+					switch serviceParts[0] {
+					case "azurerm":
+						if len(serviceParts) > 2 {
+							services[serviceParts[1]] = true
+						}
+					case "aws", "google":
+						services[serviceParts[1]] = true
+					}
+				}
+			}
 		}
-		backupPath = fmt.Sprintf("%s_bk%d", dirPath, counter)
-		counter++
 	}
 
-	// Execute rename operation
-	if err := os.Rename(dirPath, backupPath); err != nil {
-		return fmt.Errorf("failed to rename %v directory: %v", dirPath, err)
+	result := make([]string, 0, len(services))
+	for service := range services {
+		result = append(result, service)
 	}
-	log.Printf("✅ %v move to %v\n", dirPath, backupPath)
-	return nil
+	sort.Strings(result)
+	return result
+}
+
+func (ra *ResourceAnalyzer) processServiceChanges(
+	regionChanges map[string]ChangeType,
+	currentServices []string,
+	previousServices []string,
+	fileChangeType ChangeType) {
+
+	// Convert slices to maps for easier comparison
+	currentMap := make(map[string]bool)
+	for _, service := range currentServices {
+		currentMap[service] = true
+	}
+
+	previousMap := make(map[string]bool)
+	for _, service := range previousServices {
+		previousMap[service] = true
+	}
+
+	// Process based on file change type
+	switch fileChangeType {
+	case Added:
+		for service := range currentMap {
+			regionChanges[service] = Added
+		}
+	case Deleted:
+		for service := range previousMap {
+			regionChanges[service] = Deleted
+		}
+	case Modified:
+		// Check for added services
+		for service := range currentMap {
+			if !previousMap[service] {
+				regionChanges[service] = Added
+			} else {
+				regionChanges[service] = Modified
+			}
+		}
+		// Check for deleted services
+		for service := range previousMap {
+			if !currentMap[service] {
+				regionChanges[service] = Deleted
+			}
+		}
+	}
+}
+
+func (ra *ResourceAnalyzer) CommitChanges() string {
+	var message strings.Builder
+	message.WriteString("Resource Changes Summary:\n")
+
+	for accountDir, providers := range ra.Changes {
+		message.WriteString("\n")
+		message.WriteString(strings.Repeat("=", 70) + "\n")
+		message.WriteString(fmt.Sprintf("\nAccount: %s\n", accountDir))
+
+		for provider, regions := range providers {
+			// fmt.Println(strings.Repeat("-", 50))
+			message.WriteString(fmt.Sprintf("\n%s Resources:\n", strings.ToUpper(provider)))
+
+			for region, services := range regions {
+				if len(services) > 0 {
+					message.WriteString(fmt.Sprintf("\n  Region: %s\n", region))
+
+					// Group changes by type
+					added := make([]string, 0)
+					modified := make([]string, 0)
+					deleted := make([]string, 0)
+
+					for service, changeType := range services {
+						switch changeType {
+						case Added:
+							added = append(added, service)
+						case Modified:
+							modified = append(modified, service)
+						case Deleted:
+							deleted = append(deleted, service)
+						}
+					}
+
+					// Sort services for consistent output
+					sort.Strings(added)
+					sort.Strings(modified)
+					sort.Strings(deleted)
+
+					if len(added) > 0 {
+						message.WriteString("    Added Services:\n")
+						for _, service := range added {
+							message.WriteString(fmt.Sprintf("      + %s\n", service))
+						}
+					}
+
+					if len(modified) > 0 {
+						message.WriteString("    Modified Services:\n")
+						for _, service := range modified {
+							message.WriteString(fmt.Sprintf("      ~ %s\n", service))
+						}
+					}
+
+					if len(deleted) > 0 {
+						message.WriteString("    Deleted Services:\n")
+						for _, service := range deleted {
+							message.WriteString(fmt.Sprintf("      - %s\n", service))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	commitMsg := message.String()
+	// fmt.Print(commitMsg)
+
+	// Run git cmmit command
+	cmd := exec.Command("git", "commit", "-m", commitMsg)
+	if err := cmd.Run(); err != nil {
+		log.Printf("❌ Error creating git commit: %v", err)
+		return ""
+	}
+
+	return commitMsg
 }
 
 func removedWorkDir(workingFile, regionDir, provider string) error {
@@ -287,7 +560,7 @@ provider "google" {
 }
 `, fileAttributes[0], fileAttributes[1])
 	case "azure":
-		mainTFContent = fmt.Sprintf(`
+		mainTFContent = `
 terraform {
   required_providers {
     azurerm = {
@@ -300,7 +573,7 @@ terraform {
 provider "azurerm" {
   features {}
 }
-`)
+`
 	default:
 		return fmt.Errorf("unsupported provider: %s", provider)
 	}

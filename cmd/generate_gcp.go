@@ -53,7 +53,6 @@ func runTerraformerGCP(account CloudAccount) error {
 	}()
 
 	baseOutputDir := fmt.Sprintf("generated/gcp-%s", account.ID)
-	RenameDirWithBackup(baseOutputDir)
 	if err := os.MkdirAll(baseOutputDir, 0755); err != nil {
 		return fmt.Errorf("error creating base output directory: %v", err)
 	}
