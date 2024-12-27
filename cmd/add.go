@@ -26,7 +26,7 @@ import (
 
 // addCmd represents the add command
 var addCmd = &cobra.Command{
-	Use:   "add [provider-name] [.yogaya/cloud_accounts.conf-file-path] [provider-credentials-file-path]",
+	Use:   "add [provider-name] [provider-credentials-file-path]",
 	Short: "Initialize a cloud account with credentials",
 	Run:   addCommand,
 }

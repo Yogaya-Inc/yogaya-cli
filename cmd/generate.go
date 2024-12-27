@@ -43,7 +43,7 @@ type Region struct {
 
 // generateCmd represents the generate command
 var generateCmd = &cobra.Command{
-	Use:   "generate [.sample/cloud_accounts.conf-file-path]",
+	Use:   "generate",
 	Short: "Generate Terraform code from cloud resources",
 	Run:   generateCommand,
 }
@@ -359,21 +359,21 @@ func (ra *ResourceAnalyzer) CommitChanges() {
 					sort.Strings(deleted)
 
 					if len(added) > 0 {
-						message.WriteString("    Added Services:\n")
+						// message.WriteString("    Added Services:\n")
 						for _, service := range added {
 							message.WriteString(fmt.Sprintf("      + %s\n", service))
 						}
 					}
 
 					if len(modified) > 0 {
-						message.WriteString("    Modified Services:\n")
+						// message.WriteString("    Modified Services:\n")
 						for _, service := range modified {
 							message.WriteString(fmt.Sprintf("      ~ %s\n", service))
 						}
 					}
 
 					if len(deleted) > 0 {
-						message.WriteString("    Deleted Services:\n")
+						// message.WriteString("    Deleted Services:\n")
 						for _, service := range deleted {
 							message.WriteString(fmt.Sprintf("      - %s\n", service))
 						}
