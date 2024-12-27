@@ -55,11 +55,11 @@ func init() {
 
 // runGenerate handles the main generation process
 func generateCommand(cmd *cobra.Command, args []string) {
-	if len(args) != 1 {
-		fmt.Println("Usage: sample generate <.sample/cloud_accounts.conf-file-path>")
-		return
-	}
+	generateExec()
+}
 
+// runGenerate handles the main generation process
+func generateExec() {
 	// Load the credentials file
 	cm, err := NewCredentialManager()
 	if err != nil {
@@ -140,10 +140,15 @@ func (ra *ResourceAnalyzer) AnalyzeResourceChanges() error {
 	}
 
 	// Run git diff command
-	gitDiffcmd := exec.Command("git", "diff", "--cached", "--name-status")
+	gitDiffcmd := exec.Command("git", "diff", "--cached", "--name-status", "./generated")
 	gitDiffcmdOutput, err := gitDiffcmd.Output()
 	if err != nil {
 		return fmt.Errorf("error running git diff: %v", err)
+	}
+
+	if len(gitDiffcmdOutput) == 0 {
+		log.Println("No change in cloud resources")
+		return nil
 	}
 
 	// Process each changed file
@@ -311,7 +316,7 @@ func (ra *ResourceAnalyzer) processServiceChanges(
 	}
 }
 
-func (ra *ResourceAnalyzer) CommitChanges() string {
+func (ra *ResourceAnalyzer) CommitChanges() {
 	var message strings.Builder
 	message.WriteString("Resource Changes Summary:\n")
 
@@ -322,7 +327,11 @@ func (ra *ResourceAnalyzer) CommitChanges() string {
 
 		for provider, regions := range providers {
 			// fmt.Println(strings.Repeat("-", 50))
-			message.WriteString(fmt.Sprintf("\n%s Resources:\n", strings.ToUpper(provider)))
+			if provider == "azure" {
+				message.WriteString("\nAzure Resources:\n")
+			} else {
+				message.WriteString(fmt.Sprintf("\n%s Resources:\n", strings.ToUpper(provider)))
+			}
 
 			for region, services := range regions {
 				if len(services) > 0 {
@@ -381,10 +390,7 @@ func (ra *ResourceAnalyzer) CommitChanges() string {
 	cmd := exec.Command("git", "commit", "-m", commitMsg)
 	if err := cmd.Run(); err != nil {
 		log.Printf("❌ Error creating git commit: %v", err)
-		return ""
 	}
-
-	return commitMsg
 }
 
 func removedWorkDir(workingFile, regionDir, provider string) error {
