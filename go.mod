@@ -17,6 +17,8 @@ require (
 	golang.org/x/oauth2 v0.23.0
 )
 
+require github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0 // indirect
+
 require (
 	cloud.google.com/go/auth v0.9.9 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.4 // indirect
@@ -47,6 +49,8 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
+	github.com/robfig/cron/v3 v3.0.1
+	github.com/sevlyar/go-daemon v0.1.6
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.54.0 // indirect
